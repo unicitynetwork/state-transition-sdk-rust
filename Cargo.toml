@@ -1,96 +1,65 @@
-[workspace]
-
 [package]
-name = "unicity-sdk"
+name = "unicity-token"
 version = "0.1.0"
 edition = "2021"
-authors = ["Unicity Labs"]
-description = "Rust SDK for Unicity Protocol state transitions"
-repository = "https://github.com/unicitynetwork/rust-state-transition-sdk"
+rust-version = "1.81"
+description = "Clean-room Rust SDK for the Unicity token state-transition protocol, binary-compatible with the Java and TypeScript SDKs. no_std-first, zkVM/WASM friendly."
 license = "MIT OR Apache-2.0"
-keywords = ["unicity", "blockchain", "state-transition", "cryptography"]
-categories = ["cryptography", "api-bindings"]
+repository = "https://github.com/unicitynetwork/state-transition-sdk-rs"
+categories = ["cryptography", "no-std"]
+keywords = ["unicity", "token", "zkvm", "cbor", "secp256k1"]
+# Internal design doc; not part of the published API surface.
+exclude = ["rust-sdk-plan.md"]
+
+# Build docs.rs with every feature so the `http`/`client` types are documented.
+[package.metadata.docs.rs]
+all-features = true
 
 [features]
-default = ["std"]
-std = [
-    "serde/std",
-    "serde_json/std",
-    "hex/std",
-    "thiserror",
-    "anyhow",
-    "tokio",
-    "reqwest",
-    "jsonrpsee",
-    "tracing-subscriber",
-    "base64",
-    "chrono",
-    "futures",
-    "rand",
-    "k256/std",
-    "sha2/std",
-]
-
-# no_std build for zkVM guest with RISC Zero optimized crypto
-zkvm = [
-    "serde/alloc",
-    "serde_json/alloc",
-    "hex/alloc",
-]
+default = ["std", "client"]
+# alloc is always required by the core (Vec/BTreeMap for CBOR + structures).
+alloc = []
+# std enables std error integration, host RNG conveniences, JSON trust-base
+# parsing, and pulls std in deps.
+std = ["alloc", "k256/std", "sha2/std", "dep:getrandom", "dep:serde_json"]
+# client adds transaction construction, signing, and the mint/transfer flow
+# over a caller-supplied AggregatorClient transport.
+client = ["alloc"]
+# http adds a blocking JSON-RPC AggregatorClient for talking to a live
+# aggregator/gateway (host only; pulls in a TLS HTTP stack).
+http = ["std", "client", "dep:ureq", "dep:url", "dep:zeroize"]
 
 [dependencies]
-# Async runtime
-tokio = { version = "1.45", features = ["full"], optional = true }
-
-# Cryptography - RISC Zero optimized versions for faster ZK proving
-# k256 = { version = "=0.13.4", default-features = false, features = ["arithmetic", "ecdsa", "ecdsa-core", "sha256"] }
-k256 = { version = "=0.13.3", features = ["arithmetic", "serde", "expose-field", "std", "ecdsa"], default-features = false }
-sha2 = { version = "=0.10.8", default-features = false }
+sha2 = { version = "0.10", default-features = false }
+k256 = { version = "0.13", default-features = false, features = ["ecdsa", "alloc"] }
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
-rand = { version = "0.8", default-features = false, features = ["std", "std_rng"], optional = true }
-ripemd = { version = "0.1", default-features = false }
-
-# Serialization
-serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
-serde_json = { version = "1.0", default-features = false, features = ["alloc", "arbitrary_precision"] }
-ciborium = { version = "0.2", default-features = false }
-serde_bytes = { version = "0.11", default-features = false, features = ["alloc"] }
-base64 = { version = "0.22", optional = true }
-
-# Network
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], optional = true }
-jsonrpsee = { version = "0.26", features = ["http-client", "async-client"], optional = true }
-
-# Utilities
-thiserror = { version = "2.0", optional = true }
-anyhow = { version = "1.0", optional = true }
-num-bigint = { version = "0.4", default-features = false, features = ["serde"] }
+# Arbitrary-precision unsigned integers for sparse-Merkle-tree path routing
+# (the plain/sum trees used by token split). no_std + alloc, no host deps.
+num-bigint = { version = "0.4", default-features = false }
 num-traits = { version = "0.2", default-features = false }
-chrono = { version = "0.4", features = ["serde"], optional = true }
-tracing = { version = "0.1", default-features = false }
-tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
-derive_more = { version = "1.0", default-features = false, features = ["display", "from"] }
-futures = { version = "0.3", optional = true }
-indexmap = { version = "2.7", default-features = false, features = ["serde"] }
-foldhash = { version = "0.1", default-features = false }
-once_cell = { version = "1.19", default-features = false, features = ["critical-section"] }
-critical-section = { version = "1.1", default-features = false }
+getrandom = { version = "0.2", optional = true }
+serde_json = { version = "1", optional = true }
+ureq = { version = "2", optional = true }
+url = { version = "2", optional = true }
+zeroize = { version = "1", optional = true }
 
 [dev-dependencies]
-tokio-test = "0.4"
-proptest = "1.6"
-criterion = "0.6"
-testcontainers = "0.25"
-pretty_assertions = "1.4"
-rstest = "0.25"
+hex-literal = "0.4"
+# Loads e2e/.env for the live examples.
+dotenvy = "0.15"
+
+[[example]]
+name = "mint"
+required-features = ["http"]
+
+[[example]]
+name = "transfer"
+required-features = ["http"]
+
+[[example]]
+name = "split"
+required-features = ["http"]
 
 [profile.release]
 opt-level = 3
 lto = true
-codegen-units = 1
-
-[profile.dev]
-opt-level = 0
-
-[profile.test]
-opt-level = 0

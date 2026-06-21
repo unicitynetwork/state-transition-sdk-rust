@@ -1,124 +1,149 @@
-#[cfg(feature = "std")]
-use thiserror::Error;
+//! Crate-wide error types.
+//!
+//! [`Error`] covers decoding and primitive-construction failures. Verification
+//! failures use the richer [`VerificationError`](crate::verify::VerificationError)
+//! defined in the `verify` module so callers can tell *why* a token was
+//! rejected.
 
-extern crate alloc;
-use alloc::string::String;
-
-#[cfg(not(feature = "std"))]
 use core::fmt;
 
-#[cfg_attr(feature = "std", derive(Error))]
-#[derive(Debug)]
-pub enum SdkError {
-    #[cfg_attr(feature = "std", error("Cryptographic error: {0}"))]
-    Crypto(String),
+/// Result alias used throughout the crate for non-verification operations.
+pub type Result<T> = core::result::Result<T, Error>;
 
-    #[cfg_attr(feature = "std", error("Serialization error: {0}"))]
-    Serialization(String),
-
-    #[cfg_attr(feature = "std", error("Network error: {0}"))]
-    Network(String),
-
-    #[cfg_attr(feature = "std", error("Validation error: {0}"))]
-    Validation(String),
-
-    #[cfg_attr(feature = "std", error("Token operation error: {0}"))]
-    TokenOperation(String),
-
-    #[cfg_attr(feature = "std", error("SMT error: {0}"))]
-    SparseMerkleTree(String),
-
-    #[cfg_attr(feature = "std", error("Address resolution error: {0}"))]
-    AddressResolution(String),
-
-    #[cfg_attr(feature = "std", error("JSON-RPC error: {code}: {message}"))]
-    JsonRpc { code: i32, message: String },
-
-    #[cfg_attr(feature = "std", error("Timeout error: operation timed out after {0} seconds"))]
-    Timeout(u64),
-
-    #[cfg_attr(feature = "std", error("Invalid parameter: {0}"))]
-    InvalidParameter(String),
-
-    #[cfg_attr(feature = "std", error("State transition error: {0}"))]
-    StateTransition(String),
-
-    #[cfg_attr(feature = "std", error("Aggregator error: {status} - {message}"))]
-    Aggregator { status: String, message: String },
-
-    #[cfg(feature = "std")]
-    #[cfg_attr(feature = "std", error("IO error: {0}"))]
-    Io(#[from] std::io::Error),
-
-    #[cfg_attr(feature = "std", error("Hex decode error: {0}"))]
-    #[cfg(feature = "std")]
-    HexDecode(#[from] hex::FromHexError),
-
-    #[cfg_attr(feature = "std", error("Hex decode error: {0}"))]
-    #[cfg(not(feature = "std"))]
-    HexDecode(hex::FromHexError),
-
-    #[cfg(feature = "std")]
-    #[cfg_attr(feature = "std", error("Base64 decode error: {0}"))]
-    Base64Decode(#[from] base64::DecodeError),
-
-    #[cfg_attr(feature = "std", error("JSON error: {0}"))]
-    #[cfg(feature = "std")]
-    Json(#[from] serde_json::Error),
-
-    #[cfg_attr(feature = "std", error("JSON error: {0}"))]
-    #[cfg(not(feature = "std"))]
-    Json(serde_json::Error),
-
-    #[cfg_attr(feature = "std", error("CBOR error: {0}"))]
-    Cbor(String),
-
-    #[cfg(feature = "std")]
-    #[cfg_attr(feature = "std", error("HTTP request error: {0}"))]
-    Http(#[from] reqwest::Error),
-
-    #[cfg_attr(feature = "std", error("Not implemented: {0}"))]
-    NotImplemented(String),
+/// Errors raised while decoding wire formats or constructing primitives from
+/// untrusted input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Error {
+    /// A CBOR item was malformed, truncated, or not the expected type.
+    Cbor(CborError),
+    /// A value did not have the byte length required by its type.
+    InvalidLength {
+        /// What was being decoded.
+        what: &'static str,
+        /// Expected length (or minimum), in bytes.
+        expected: usize,
+        /// Actual length seen, in bytes.
+        actual: usize,
+    },
+    /// A hash algorithm id was not recognised.
+    UnknownHashAlgorithm(u16),
+    /// A secp256k1 public key, signature, or recovery id was invalid.
+    Crypto(&'static str),
+    /// A numeric value fell outside its permitted range.
+    OutOfRange(&'static str),
+    /// A field held an unexpected discriminant (engine, predicate type, ...).
+    UnexpectedValue(&'static str),
+    /// A root trust base is structurally unsafe for quorum verification.
+    InvalidTrustBase(&'static str),
 }
 
-// Implement Display for no_std environments
-#[cfg(not(feature = "std"))]
-impl fmt::Display for SdkError {
+/// Detailed CBOR decoding error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CborError {
+    /// Ran out of bytes while reading an item.
+    UnexpectedEof,
+    /// The CBOR major type did not match what the decoder expected.
+    UnexpectedMajorType {
+        /// Major type the decoder required (0-7).
+        expected: u8,
+        /// Major type actually found.
+        found: u8,
+    },
+    /// A definite-length array had a different element count than required.
+    UnexpectedArrayLength {
+        /// Required element count.
+        expected: usize,
+        /// Actual element count.
+        found: usize,
+    },
+    /// Encountered a tag number other than the one required by a type.
+    UnexpectedTag {
+        /// Required tag number.
+        expected: u64,
+        /// Actual tag number.
+        found: u64,
+    },
+    /// Additional-information field used a reserved/unsupported encoding
+    /// (28-30) or an indefinite length (31), both rejected for determinism.
+    UnsupportedAdditionalInfo(u8),
+    /// Trailing bytes remained after a value that should have consumed all input.
+    TrailingBytes,
+    /// An integer did not fit into the target type.
+    IntegerOverflow,
+    /// A value or length used a wider-than-necessary CBOR encoding.
+    NonCanonicalEncoding,
+    /// Map keys were not in deterministic encoded-byte order.
+    NonCanonicalMapOrder,
+    /// A map contained the same encoded key more than once.
+    DuplicateMapKey,
+    /// An explicit decoder resource limit was exceeded.
+    LimitExceeded(&'static str),
+}
+
+impl From<CborError> for Error {
+    fn from(e: CborError) -> Self {
+        Error::Cbor(e)
+    }
+}
+
+impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            SdkError::Crypto(msg) => write!(f, "Cryptographic error: {}", msg),
-            SdkError::Serialization(msg) => write!(f, "Serialization error: {}", msg),
-            SdkError::Network(msg) => write!(f, "Network error: {}", msg),
-            SdkError::Validation(msg) => write!(f, "Validation error: {}", msg),
-            SdkError::TokenOperation(msg) => write!(f, "Token operation error: {}", msg),
-            SdkError::SparseMerkleTree(msg) => write!(f, "SMT error: {}", msg),
-            SdkError::AddressResolution(msg) => write!(f, "Address resolution error: {}", msg),
-            SdkError::JsonRpc { code, message } => write!(f, "JSON-RPC error: {}: {}", code, message),
-            SdkError::Timeout(secs) => write!(f, "Timeout error: operation timed out after {} seconds", secs),
-            SdkError::InvalidParameter(msg) => write!(f, "Invalid parameter: {}", msg),
-            SdkError::StateTransition(msg) => write!(f, "State transition error: {}", msg),
-            SdkError::Aggregator { status, message } => write!(f, "Aggregator error: {} - {}", status, message),
-            SdkError::HexDecode(e) => write!(f, "Hex decode error: {}", e),
-            SdkError::Json(e) => write!(f, "JSON error: {}", e),
-            SdkError::Cbor(msg) => write!(f, "CBOR error: {}", msg),
-            SdkError::NotImplemented(msg) => write!(f, "Not implemented: {}", msg),
+            Error::Cbor(e) => write!(f, "CBOR error: {e}"),
+            Error::InvalidLength {
+                what,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "invalid length for {what}: expected {expected}, got {actual}"
+            ),
+            Error::UnknownHashAlgorithm(id) => write!(f, "unknown hash algorithm id: {id}"),
+            Error::Crypto(m) => write!(f, "crypto error: {m}"),
+            Error::OutOfRange(m) => write!(f, "value out of range: {m}"),
+            Error::UnexpectedValue(m) => write!(f, "unexpected value: {m}"),
+            Error::InvalidTrustBase(m) => write!(f, "invalid root trust base: {m}"),
         }
     }
 }
 
-pub type Result<T> = core::result::Result<T, SdkError>;
-
-// Manual From implementations for no_std mode
-#[cfg(not(feature = "std"))]
-impl From<hex::FromHexError> for SdkError {
-    fn from(err: hex::FromHexError) -> Self {
-        SdkError::HexDecode(err)
+impl fmt::Display for CborError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CborError::UnexpectedEof => write!(f, "unexpected end of input"),
+            CborError::UnexpectedMajorType { expected, found } => {
+                write!(
+                    f,
+                    "unexpected major type: expected {expected}, found {found}"
+                )
+            }
+            CborError::UnexpectedArrayLength { expected, found } => {
+                write!(
+                    f,
+                    "unexpected array length: expected {expected}, found {found}"
+                )
+            }
+            CborError::UnexpectedTag { expected, found } => {
+                write!(f, "unexpected tag: expected {expected}, found {found}")
+            }
+            CborError::UnsupportedAdditionalInfo(i) => {
+                write!(f, "unsupported additional information: {i}")
+            }
+            CborError::TrailingBytes => write!(f, "trailing bytes after value"),
+            CborError::IntegerOverflow => write!(f, "integer overflow"),
+            CborError::NonCanonicalEncoding => write!(f, "non-canonical CBOR encoding"),
+            CborError::NonCanonicalMapOrder => {
+                write!(f, "CBOR map keys are not in canonical order")
+            }
+            CborError::DuplicateMapKey => write!(f, "duplicate CBOR map key"),
+            CborError::LimitExceeded(resource) => {
+                write!(f, "CBOR resource limit exceeded: {resource}")
+            }
+        }
     }
 }
 
-#[cfg(not(feature = "std"))]
-impl From<serde_json::Error> for SdkError {
-    fn from(err: serde_json::Error) -> Self {
-        SdkError::Json(err)
-    }
-}
+impl core::error::Error for Error {}
+impl core::error::Error for CborError {}

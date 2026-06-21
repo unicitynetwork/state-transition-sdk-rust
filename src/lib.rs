@@ -1,136 +1,54 @@
-//! # Unicity SDK for Rust
+//! # Unicity token state-transition SDK
 //!
-//! This SDK provides a comprehensive implementation of the Unicity Protocol
-//! for creating and managing off-chain token state transitions with on-chain commitments.
+//! Clean-room Rust implementation of the Unicity token state-transition
+//! protocol, binary-compatible (byte-for-byte CBOR) with the reference Java and
+//! TypeScript SDKs.
 //!
-//! ## Features
+//! The crate is `no_std`-first. The default build (`std` + `client`) gives the
+//! full SDK; building with `--no-default-features` yields the pure `no_std`
+//! verification + decoding core intended for zkVM guests (SP1 / RISC0) and
+//! `wasm32` targets.
 //!
-//! - Token minting, transfer, and splitting operations
-//! - Cryptographic predicates for ownership control
-//! - Sparse Merkle Tree (SMT) implementation for inclusion proofs
-//! - CBOR and JSON serialization
-//! - Async aggregator client with JSON-RPC
-//! - secp256k1 ECDSA signatures with recovery
+//! ## Security model
 //!
-//! ## Quick Start
+//! Decoding a structure proves *nothing* about its validity. Trust is
+//! established exclusively by [`Token::verify`], which walks an unbroken chain
+//! of cryptographic checks from a caller-supplied root of trust
+//! ([`RootTrustBase`]) down to every state in the token's history. See the
+//! `verify` module for the enforced invariants.
 //!
-//! ```rust,no_run
-//! use unicity_sdk::client::StateTransitionClient;
-//! use unicity_sdk::crypto::KeyPair;
-//! use unicity_sdk::types::token::{TokenType, TokenState, TokenId};
-//! use unicity_sdk::types::transaction::MintTransactionData;
-//! use unicity_sdk::types::predicate::UnmaskedPredicate;
+//! Application `data` and mint *justifications* are treated as opaque by
+//! [`Token::verify`] and rejected unless a verifier is registered for them. The
+//! [`payment`] module adds the fungible-asset payload and token-split subsystem:
+//! verify such tokens fail-closed (policy-gated) with
+//! [`payment::verify_payment_token`], and construct splits (under the `client`
+//! feature) with `payment::TokenSplit`. The split inclusion proofs use the
+//! bigint-routed sparse Merkle trees in [`smt`].
 //!
-//! #[tokio::main]
-//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     // Create client
-//!     let client = StateTransitionClient::new(
-//!         "https://goggregator-test.unicity.network".to_string()
-//!     )?;
-//!
-//!     // Generate key pair
-//!     let key_pair = KeyPair::generate()?;
-//!
-//!     // Create token state
-//!     let predicate = UnmaskedPredicate::new(key_pair.public_key().clone());
-//!     let state = TokenState::from_predicate(&predicate, None)?;
-//!
-//!     // Create recipient address from state (predicate hash only, not including data)
-//!     let address_hash = state.address_hash()?;
-//!     let recipient = unicity_sdk::types::address::GenericAddress::direct(address_hash);
-//!
-//!     // Create mint data with unique token ID
-//!     let mint_data = MintTransactionData::new(
-//!         TokenId::unique(),  // Generate unique token ID
-//!         TokenType::new(b"TEST".to_vec()),
-//!         None,  // token_data
-//!         None,  // coin_data
-//!         recipient,  // recipient address
-//!         vec![1, 2, 3, 4, 5],  // salt (5 bytes, not Option)
-//!         None,  // recipient_data_hash (None since state has no data)
-//!         None,  // reason
-//!     );
-//!
-//!     // Mint token (uses universal minter internally)
-//!     let token = client.mint_token(mint_data, state).await?;
-//!
-//!     Ok(())
-//! }
-//! ```
+//! [`Token::verify`]: crate::transaction::Token::verify
+//! [`RootTrustBase`]: crate::api::bft::RootTrustBase
 
 #![cfg_attr(not(feature = "std"), no_std)]
+#![forbid(unsafe_code)]
+#![warn(missing_debug_implementations)]
 
-#[cfg(all(not(feature = "std"), feature = "zkvm"))]
 extern crate alloc;
 
-// Critical section implementation for zkvm
-#[cfg(all(not(feature = "std"), feature = "zkvm"))]
-mod sync;
-
-// Only include client module (and any network-related parts) in std builds
-pub mod prelude;
-#[cfg(feature = "std")]
+pub mod api;
+pub mod cbor;
+#[cfg(feature = "client")]
 pub mod client;
-
 pub mod crypto;
 pub mod error;
-pub mod minter;
+pub mod payment;
+pub mod predicate;
 pub mod smt;
-pub mod types;
+pub mod transaction;
+pub mod verify;
 
-// Re-export commonly used items at crate root
-#[cfg(feature = "std")]
-pub use client::{AggregatorClient, StateTransitionClient};
+pub use error::{Error, Result};
+pub use transaction::Token;
+pub use verify::VerificationError;
 
-pub use crypto::{KeyPair, SigningService};
-pub use error::{Result, SdkError};
-pub use types::{Token, TokenId, TokenState, TokenType};
-
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const VERSION_MAJOR: &str = env!("CARGO_PKG_VERSION_MAJOR");
-pub const VERSION_MINOR: &str = env!("CARGO_PKG_VERSION_MINOR");
-pub const VERSION_PATCH: &str = env!("CARGO_PKG_VERSION_PATCH");
-
-#[cfg(feature = "std")]
-pub fn init() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::INFO.into()),
-        )
-        .try_init();
-}
-
-#[cfg(feature = "std")]
-#[derive(Clone, Debug)]
-pub struct Config {
-    pub aggregator_url: String,
-    pub timeout_seconds: u64,
-    pub retry_attempts: u32,
-}
-
-#[cfg(feature = "std")]
-impl Config {
-    pub fn new(aggregator_url: String) -> Self {
-        Self {
-            aggregator_url,
-            timeout_seconds: 30,
-            retry_attempts: 3,
-        }
-    }
-
-    pub fn test_network() -> Self {
-        Self::new("https://goggregator-test.unicity.network".to_string())
-    }
-
-    pub fn local() -> Self {
-        Self::new("http://localhost:3000".to_string())
-    }
-}
-
-#[cfg(feature = "std")]
-impl Default for Config {
-    fn default() -> Self {
-        Self::test_network()
-    }
-}
+// Convenience re-export of the workhorse hash.
+pub use crypto::hash::{DataHash, DataHasher, HashAlgorithm};

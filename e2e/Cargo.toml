@@ -1,0 +1,13 @@
+[package]
+name = "unicity-token-e2e"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+dotenvy = "0.15"
+hex = "0.4"
+unicity-token = { path = "..", default-features = false, features = ["http"] }
+
+# Keep this standalone demo separate from the SDK package in the parent directory.
+[workspace]

@@ -1,1 +1,32 @@
-/target
+state-transition-sdk-*/
+e2e/.env
+
+# Rust
+target/
+**/*.rs.bk
+*.pdb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.claude/
+.codex/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Configuration
+config.toml
+keys/
+
+# Logs
+*.log
+
+# Database
+*.db
+*.sqlite
+data/

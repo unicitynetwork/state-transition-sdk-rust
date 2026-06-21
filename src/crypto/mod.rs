@@ -1,15 +1,12 @@
+//! Cryptographic primitives: hashing ([`hash`]) and secp256k1 signatures
+//! ([`signature`]).
+//!
+//! Verification-only consumers (zkVM guests) need just these two modules plus
+//! the decoders. Key generation and signing live behind the `client` feature in
+//! the `signer` module.
+
 pub mod hash;
-pub mod keys;
-pub mod signing;
+pub mod signature;
 
-// Re-export commonly used items
-pub use hash::{sha256, sha256_all, DataHasher, HashAlgorithm};
-pub use keys::{KeyPair, TestIdentity};
-#[cfg(feature = "std")]
-pub use keys::KeyStore;
-pub use signing::{public_key_from_secret, SigningService};
-#[cfg(feature = "rand")]
-pub use signing::generate_secret_key;
-
-// Re-export k256 types for convenience
-pub use k256::ecdsa::{SigningKey, VerifyingKey};
+#[cfg(any(feature = "client", test))]
+pub mod signer;
