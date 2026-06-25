@@ -37,4 +37,4 @@ pub use verifier::{
 pub use crate::rsmst::RsmstInclusionProof;
 
 #[cfg(any(feature = "client", test))]
-pub use split::{Split, SplitBurn, SplitToken, SplitTokenRequest, TokenSplit};
+pub use split::{Split, SplitBurn, SplitError, SplitToken, SplitTokenRequest, TokenSplit};

@@ -11,9 +11,10 @@
 //!
 //! The structure deliberately mirrors the plain radix SMT used for transaction
 //! inclusion ([`InclusionCertificate`](crate::api::InclusionCertificate)) — same
-//! key space, same LSB-first bit order, same canonical bifurcation depths — but
-//! is domain-separated from it (`0x10`/`0x11` vs `0x00`/`0x01`) and additionally
-//! commits the per-subtree sum next to every child hash.
+//! key space, same bit order (the single shared [`crate::radix::bit_at`]
+//! convention), same canonical bifurcation depths — but is domain-separated from
+//! it (`0x10`/`0x11` vs `0x00`/`0x01`) and additionally commits the per-subtree
+//! sum next to every child hash.
 //!
 //! Hash inputs are fixed binary concatenations, **not** CBOR tuples:
 //!
@@ -148,11 +149,12 @@ pub fn node_hash(
     Some((hash, sum))
 }
 
-/// Bit `index` of a 256-bit key in LSB-first order: bit 0 is the least
-/// significant bit of the whole key (the low bit of the last byte).
+/// Bit `index` of a 256-bit key, using the SDK's one shared radix bit order
+/// ([`crate::radix::bit_at`]): bit `index % 8` of byte `index / 8`. The builder
+/// and the verifier go through this same helper, so they share exactly one
+/// key/depth convention with the transaction inclusion certificate.
 fn key_bit(key: &[u8; 32], index: u8) -> bool {
-    let byte = 31 - (index / 8) as usize;
-    (key[byte] >> (index % 8)) & 1 == 1
+    crate::radix::bit_at(key, index as usize)
 }
 
 #[cfg(test)]
@@ -160,17 +162,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn key_bit_is_lsb_first() {
+    fn key_bit_matches_shared_radix_convention() {
+        // Bit i = bit (i%8) of byte (i/8), byte 0 first (the shared RSMT order).
         let mut key = [0u8; 32];
-        key[31] = 0b0000_0101; // bits 0 and 2 set
-        key[30] = 0b0000_0010; // bit 9 set
-        key[0] = 0b1000_0000; // bit 255 set
+        key[0] = 0b0000_0101; // bits 0 and 2 set
+        key[1] = 0b0000_0010; // bit 9 set
+        key[31] = 0b1000_0000; // bit 255 set
         assert!(key_bit(&key, 0));
         assert!(!key_bit(&key, 1));
         assert!(key_bit(&key, 2));
         assert!(key_bit(&key, 9));
         assert!(key_bit(&key, 255));
         assert!(!key_bit(&key, 254));
+        // Agrees with the helper the inclusion certificate uses.
+        assert_eq!(key_bit(&key, 9), crate::radix::bit_at(&key, 9));
     }
 
     #[test]

@@ -16,16 +16,13 @@ const BITMAP_SIZE: usize = 32;
 const HASH_SIZE: usize = 32;
 const MAX_DEPTH: usize = 255;
 
+use crate::radix::bit_at;
+
 /// A sparse-Merkle-tree inclusion path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InclusionCertificate {
     bitmap: [u8; BITMAP_SIZE],
     siblings: Vec<[u8; HASH_SIZE]>,
-}
-
-/// LSB-first bit at `depth` of `data`.
-fn bit_at(data: &[u8], depth: usize) -> u8 {
-    (data[depth / 8] >> (depth % 8)) & 1
 }
 
 impl InclusionCertificate {
@@ -89,7 +86,7 @@ impl InclusionCertificate {
 
         let mut position = self.siblings.len();
         for depth in (0..=MAX_DEPTH).rev() {
-            if bit_at(&self.bitmap, depth) == 0 {
+            if !bit_at(&self.bitmap, depth) {
                 continue;
             }
             if position == 0 {
@@ -101,7 +98,7 @@ impl InclusionCertificate {
             let h = DataHasher::new(HashAlgorithm::Sha256)
                 .expect("sha256")
                 .update(&[0x01, depth as u8]);
-            hash = if bit_at(key, depth) == 1 {
+            hash = if bit_at(key, depth) {
                 h.update(sibling).update(hash.data())
             } else {
                 h.update(hash.data()).update(sibling)

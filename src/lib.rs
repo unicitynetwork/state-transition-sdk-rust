@@ -42,6 +42,7 @@ pub mod crypto;
 pub mod error;
 pub mod payment;
 pub mod predicate;
+mod radix;
 pub mod rsmst;
 pub mod transaction;
 pub mod verify;

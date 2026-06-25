@@ -357,6 +357,8 @@ fn split_outputs_verify_end_to_end() {
 
     let split = TokenSplit::split(
         &s.source,
+        &s.tb,
+        &registry,
         PaymentAssetCollection::from_cbor_bytes,
         s.requests,
         Some([7u8; 32]),
@@ -441,6 +443,8 @@ fn recursive_split_verification_honors_shared_depth_limit() {
     let s = scenario();
     let split = TokenSplit::split(
         &s.source,
+        &s.tb,
+        &registry(),
         PaymentAssetCollection::from_cbor_bytes,
         s.requests,
         Some([7u8; 32]),
@@ -502,6 +506,8 @@ fn rejects_tampered_output_amount() {
     let s = scenario();
     let split = TokenSplit::split(
         &s.source,
+        &s.tb,
+        &registry(),
         PaymentAssetCollection::from_cbor_bytes,
         s.requests,
         Some([7u8; 32]),
@@ -538,6 +544,8 @@ fn rejects_dropped_proof() {
     let s = scenario();
     let split = TokenSplit::split(
         &s.source,
+        &s.tb,
+        &registry(),
         PaymentAssetCollection::from_cbor_bytes,
         s.requests,
         Some([7u8; 32]),
@@ -570,6 +578,8 @@ fn rejects_wrong_burn_predicate() {
     let s = scenario();
     let split = TokenSplit::split(
         &s.source,
+        &s.tb,
+        &registry(),
         PaymentAssetCollection::from_cbor_bytes,
         s.requests,
         Some([7u8; 32]),
@@ -628,6 +638,8 @@ fn rejects_missing_manifest() {
     let s = scenario();
     let split = TokenSplit::split(
         &s.source,
+        &s.tb,
+        &registry(),
         PaymentAssetCollection::from_cbor_bytes,
         s.requests,
         Some([7u8; 32]),
@@ -665,6 +677,8 @@ fn rejects_manifest_length_mismatch() {
     let s = scenario();
     let split = TokenSplit::split(
         &s.source,
+        &s.tb,
+        &registry(),
         PaymentAssetCollection::from_cbor_bytes,
         s.requests,
         Some([7u8; 32]),
@@ -714,7 +728,7 @@ fn rejects_wrong_output_token_type() {
         TokenType::new(vec![0xC9; 32]),
         TokenSalt::from_bytes([0x10; 32]),
     )];
-    assert!(TokenSplit::split(
+    assert!(TokenSplit::split_unchecked(
         &s.source,
         PaymentAssetCollection::from_cbor_bytes,
         bad,
@@ -738,7 +752,7 @@ fn rejects_unbalanced_split_at_build_time() {
         coin_type(),
         TokenSalt::from_bytes([0x10; 32]),
     )];
-    assert!(TokenSplit::split(
+    assert!(TokenSplit::split_unchecked(
         &s.source,
         PaymentAssetCollection::from_cbor_bytes,
         bad,

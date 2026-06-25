@@ -204,8 +204,12 @@ fn main() {
         ),
     ];
 
+    // `split` verifies the source token (history, embedded chain, issuance
+    // policy) before constructing the irreversible burn.
     let split = TokenSplit::split(
         &source,
+        &trust_base,
+        &registry,
         PaymentAssetCollection::from_cbor_bytes,
         requests,
         Some(BURN_STATE_MASK),

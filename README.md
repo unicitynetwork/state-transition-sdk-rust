@@ -70,14 +70,11 @@ let assets = verify_payment_token(
 ```
 
 Constructing a split (mint → split → mint outputs) is a `client`-feature
-operation via `payment::TokenSplit::split`. The verifier independently re-checks
-value conservation — every output's RSMST proof must reconstruct a root sum
-equal to the authenticated source amount — so client-side construction is
-untrusted. The split proofs ride on the radix sparse Merkle sum trees in the
-`rsmst` module; their decoding is bounded by the per-proof limits and the
-cumulative `VerificationPolicy` / `VerificationLimits` (embedded-token depth and
-byte budgets) to stay safe on attacker-controlled input. See
-`src/payment/tests.rs` for an end-to-end example.
+operation via `payment::TokenSplit::split`, which **verifies the source token
+fully before constructing the irreversible burn** (history, embedded split
+chain, and the registered issuance policy); if verification fails no burn is
+produced. `split_unchecked` skips that when the source is already
+known good.  See `src/payment/tests.rs` for an end-to-end example.
 
 ## Feature Flags
 

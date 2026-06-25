@@ -12,10 +12,13 @@
 //! [`SplitMintJustificationVerifier`]: super::verifier::SplitMintJustificationVerifier
 
 use alloc::vec::Vec;
+use core::fmt;
 
 use super::asset::PaymentAssetCollection;
 use super::commitment::split_output_commitment;
 use super::manifest::SplitManifest;
+use super::verifier::{verify_payment_token, PaymentDataDecoder};
+use crate::api::bft::RootTrustBase;
 use crate::api::network_id::NetworkId;
 use crate::error::Error;
 use crate::predicate::builtin::BurnPredicate;
@@ -24,6 +27,8 @@ use crate::rsmst::build::Rsmst;
 use crate::rsmst::RsmstInclusionProof;
 use crate::transaction::ids::{TokenId, TokenSalt, TokenType};
 use crate::transaction::{Token, TransferTransaction};
+use crate::verify::MintJustificationRegistry;
+use crate::VerificationError;
 
 /// A request to mint one new token as part of a split.
 #[derive(Debug, Clone)]
@@ -90,33 +95,99 @@ pub struct Split {
     pub tokens: Vec<SplitToken>,
 }
 
+/// Why a split could not be produced (see [`TokenSplit::split`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SplitError {
+    /// The source token failed verification, so no burn was constructed. The
+    /// caller's value is untouched.
+    Verification(VerificationError),
+    /// The source verified, but the requested split could not be built (e.g. a
+    /// per-asset total does not equal the source amount, or a duplicate output
+    /// id). No burn was constructed.
+    Build(Error),
+}
+
+impl fmt::Display for SplitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SplitError::Verification(e) => write!(f, "source token verification failed: {e}"),
+            SplitError::Build(e) => write!(f, "split construction failed: {e}"),
+        }
+    }
+}
+
+impl core::error::Error for SplitError {}
+
 /// Token splitting.
 #[derive(Debug)]
 pub struct TokenSplit;
 
 impl TokenSplit {
-    /// Split `token` into the outputs described by `requests`.
+    /// Split `token` into the outputs described by `requests`, after fully
+    /// verifying the source token.
+    ///
+    /// The source token is verified with [`verify_payment_token`] — its whole
+    /// cryptographic history, any embedded split chain, and the registered
+    /// issuance policy for its token type — **before** the irreversible burn
+    /// transfer is constructed. If verification fails, no burn is produced and
+    /// the caller's value is untouched. `registry` must therefore hold the
+    /// payment-data verifier for the source token type (and the split verifier if
+    /// the source is itself a split output).
     ///
     /// `decode_payment_data` extracts the source token's [`PaymentAssetCollection`]
     /// from its mint `data`. `burn_state_mask` sets the burn transfer's state
     /// mask; pass `None` for a random mask (requires the `std` RNG) or a fixed
     /// value for a reproducible, crash-resumable burn.
+    ///
+    /// To split a token whose validity you have already established by other
+    /// means, use [`TokenSplit::split_unchecked`].
     pub fn split(
         token: &Token,
-        decode_payment_data: fn(&[u8]) -> Result<PaymentAssetCollection, Error>,
+        trust_base: &RootTrustBase,
+        registry: &MintJustificationRegistry,
+        decode_payment_data: PaymentDataDecoder,
+        requests: Vec<SplitTokenRequest>,
+        burn_state_mask: Option<[u8; 32]>,
+    ) -> Result<Split, SplitError> {
+        let assets = verify_payment_token(token, trust_base, registry, decode_payment_data)
+            .map_err(SplitError::Verification)?;
+        Self::build_split(token, assets, requests, burn_state_mask).map_err(SplitError::Build)
+    }
+
+    /// Split `token` **without verifying it first**.
+    ///
+    /// This constructs an irreversible burn transfer from an unverified source
+    /// token. Only use it when the source token's validity (and ownership of its
+    /// current state) is already established; otherwise prefer
+    /// [`TokenSplit::split`], which verifies before burning. The split outputs
+    /// are still independently checked by the verifier when later minted, but an
+    /// invalid source can only be discovered *after* value has been burned.
+    pub fn split_unchecked(
+        token: &Token,
+        decode_payment_data: PaymentDataDecoder,
         requests: Vec<SplitTokenRequest>,
         burn_state_mask: Option<[u8; 32]>,
     ) -> Result<Split, Error> {
-        let network_id = token.genesis().transaction().network_id();
-        let source_token_type = token.token_type().clone();
-
-        // The source token's declared canonical asset collection (A).
         let source_bytes = token
             .genesis()
             .transaction()
             .data()
             .ok_or(Error::UnexpectedValue("source token has no payment data"))?;
         let assets = decode_payment_data(source_bytes)?;
+        Self::build_split(token, assets, requests, burn_state_mask)
+    }
+
+    /// Construct the split from the source token's already-decoded canonical
+    /// asset collection. Shared by [`split`](Self::split) and
+    /// [`split_unchecked`](Self::split_unchecked).
+    fn build_split(
+        token: &Token,
+        assets: PaymentAssetCollection,
+        requests: Vec<SplitTokenRequest>,
+        burn_state_mask: Option<[u8; 32]>,
+    ) -> Result<Split, Error> {
+        let network_id = token.genesis().transaction().network_id();
+        let source_token_type = token.token_type().clone();
 
         // Validate each request and derive its token id and output commitment.
         let mut entries: Vec<(SplitTokenRequest, TokenId, [u8; 32])> = Vec::new();
