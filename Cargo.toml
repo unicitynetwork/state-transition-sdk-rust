@@ -33,10 +33,9 @@ http = ["std", "client", "dep:ureq", "dep:url", "dep:zeroize"]
 sha2 = { version = "0.10", default-features = false }
 k256 = { version = "0.13", default-features = false, features = ["ecdsa", "alloc"] }
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
-# Arbitrary-precision unsigned integers for sparse-Merkle-tree path routing
-# (the plain/sum trees used by token split). no_std + alloc, no host deps.
+# Arbitrary-precision unsigned integers for 256-bit asset amounts and the radix
+# sparse Merkle sum tree sums used by token split. no_std + alloc, no host deps.
 num-bigint = { version = "0.4", default-features = false }
-num-traits = { version = "0.2", default-features = false }
 getrandom = { version = "0.2", optional = true }
 serde_json = { version = "1", optional = true }
 ureq = { version = "2", optional = true }

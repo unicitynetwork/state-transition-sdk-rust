@@ -22,8 +22,8 @@
 //! [`payment`] module adds the fungible-asset payload and token-split subsystem:
 //! verify such tokens fail-closed (policy-gated) with
 //! [`payment::verify_payment_token`], and construct splits (under the `client`
-//! feature) with `payment::TokenSplit`. The split inclusion proofs use the
-//! bigint-routed sparse Merkle trees in [`smt`].
+//! feature) with `payment::TokenSplit`. The split inclusion proofs use the radix
+//! sparse Merkle sum trees in [`rsmst`].
 //!
 //! [`Token::verify`]: crate::transaction::Token::verify
 //! [`RootTrustBase`]: crate::api::bft::RootTrustBase
@@ -42,7 +42,7 @@ pub mod crypto;
 pub mod error;
 pub mod payment;
 pub mod predicate;
-pub mod smt;
+pub mod rsmst;
 pub mod transaction;
 pub mod verify;
 

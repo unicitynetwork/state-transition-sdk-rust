@@ -28,11 +28,15 @@ carries either is rejected unless you opt in to a verifier for it.
 
 ## Payment, assets & token split
 
-A token can carry a fungible **payment payload** — a `PaymentAssetCollection`
-(asset id → amount) — in its mint `data`, and a token can be **split** into
-several new tokens whose assets sum to the original. The source token is burned
-to an aggregation-tree root, and each output's genesis carries a
-`SplitMintJustification` (CBOR tag 39044) proving its share.
+A token can carry a fungible **payment payload** — a `PaymentAssetCollection`, a
+non-empty canonical set of (asset id → amount) entries — in its mint `data`, and
+a token can be **split** into several new tokens whose per-asset allocations sum
+to the original. The split builds one **radix sparse Merkle sum tree** (RSMST)
+per asset, keyed by output token id; the per-asset root hashes form a
+`SplitManifest` (CBOR tag 39046) that the source token is burned to (the burn
+predicate's reason is `SHA-256` of the manifest, stored as the burn transfer's
+auxiliary data). Each output's genesis carries a `SplitMintJustification`
+(CBOR tag 39044) with one RSMST allocation proof per asset, proving its share.
 
 Verifying payment tokens is **fail-closed and policy-gated**: cryptographic
 certification alone never authorizes an asset issuer, so you must register the
@@ -67,11 +71,13 @@ let assets = verify_payment_token(
 
 Constructing a split (mint → split → mint outputs) is a `client`-feature
 operation via `payment::TokenSplit::split`. The verifier independently re-checks
-value conservation, so client-side construction is untrusted. The split proofs
-ride on bigint-routed sparse Merkle trees in the `smt` module; their decoding is
-bounded by the `MAX_SMT_*` limits and the cumulative `VerificationPolicy` /
-`VerificationLimits` (embedded-token depth and byte budgets) to stay safe on
-attacker-controlled input. See `src/payment/tests.rs` for an end-to-end example.
+value conservation — every output's RSMST proof must reconstruct a root sum
+equal to the authenticated source amount — so client-side construction is
+untrusted. The split proofs ride on the radix sparse Merkle sum trees in the
+`rsmst` module; their decoding is bounded by the per-proof limits and the
+cumulative `VerificationPolicy` / `VerificationLimits` (embedded-token depth and
+byte budgets) to stay safe on attacker-controlled input. See
+`src/payment/tests.rs` for an end-to-end example.
 
 ## Feature Flags
 

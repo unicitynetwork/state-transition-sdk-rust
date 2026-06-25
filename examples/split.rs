@@ -3,9 +3,10 @@
 //!
 //! Mints a coin token carrying a fungible payment payload (300 EUR + 500 USD),
 //! splits it into three new coins (150 EUR, 150 EUR, 500 USD), burns the
-//! original, mints each output with a `SplitMintJustification`, and verifies the
-//! outputs **fail-closed** via [`payment::verify_payment_token`]. Each minted
-//! output's CBOR is printed as hex, like the model example.
+//! original to its split-manifest burn predicate, mints each output with a
+//! `SplitMintJustification`, and verifies the outputs **fail-closed** via
+//! [`payment::verify_payment_token`]. Each minted output's CBOR is printed as
+//! hex, like the model example.
 //!
 //! Connection parameters come from `e2e/.env` (see `e2e/.env.example`).
 //!
@@ -211,8 +212,9 @@ fn main() {
     )
     .expect("build split");
 
-    // Burn the source coin to the split's aggregation-root burn predicate, using
-    // the same state mask so the certified burn matches the split proofs.
+    // Burn the source coin to the split's manifest burn predicate, storing the
+    // exact manifest bytes as the burn transfer's auxiliary data and reusing the
+    // same state mask so the certified burn matches the split proofs.
     let burnt = client::transfer(
         &aggregator,
         &trust_base,
@@ -220,7 +222,7 @@ fn main() {
         &split.burn.owner_predicate,
         &alice,
         StateMask::from_bytes(BURN_STATE_MASK),
-        None,
+        Some(split.burn.manifest.clone()),
     )
     .expect("burn source coin");
 

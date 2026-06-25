@@ -36,32 +36,28 @@ pub enum VerificationError {
     SplitNetworkMismatch,
     /// The burned source token in a split justification failed verification.
     BurnTokenVerificationFailed(Box<VerificationError>),
-    /// The payment asset count does not match the number of split proofs.
-    SplitAssetCountMismatch,
+    /// The output token type is not byte-identical to the source token type.
+    SplitTokenTypeMismatch,
+    /// The burned source token did not end in a (burn) transfer.
+    SplitBurnTransferMissing,
+    /// The burn transfer carried no auxiliary split-manifest data.
+    SplitManifestMissing,
+    /// The split manifest failed to decode (wrong tag, length, or structure).
+    SplitManifestMalformed,
+    /// The manifest root count does not equal the source asset count.
+    SplitManifestLengthMismatch,
+    /// The proof count does not equal the number of output assets.
+    SplitProofCountMismatch,
+    /// An RSMST allocation proof did not verify against its manifest root.
+    SplitAllocationProofInvalid,
     /// The burned source token carried no decodable payment data.
     SplitSourcePaymentDataMissing,
     /// An output asset did not exist in the burned source token.
     SplitSourceAssetMissing,
-    /// The split sum-tree total did not equal the burned source amount.
+    /// A proof's reconstructed root sum did not equal the burned source amount.
     SplitSourceAmountMismatch,
-    /// Two split proofs claim the same asset id.
-    DuplicateSplitProof,
-    /// A split proof's aggregation-tree path did not verify for its asset id.
-    SplitAggregationPathInvalid,
-    /// A split proof's asset-tree path did not verify for the minted token id.
-    SplitAssetTreePathInvalid,
-    /// Split proofs are not all derived from the same aggregation tree.
-    SplitProofRootMismatch,
-    /// A proof's asset-tree root does not match its aggregation-path leaf.
-    SplitAssetTreeRootMismatch,
-    /// A proof's asset id is absent from the genesis payment data.
-    SplitAssetNotInPayment,
-    /// A proof's certified amount does not match the payment data amount.
-    SplitAssetAmountMismatch,
-    /// The burned token was not locked to the split's aggregation-root burn predicate.
+    /// The burned token was not locked to the split manifest's burn predicate.
     SplitBurnPredicateMismatch,
-    /// Fewer validated proofs than payment assets — some proofs are missing.
-    SplitProofsIncomplete,
     /// The inclusion proof had no inclusion certificate.
     InclusionCertificateMissing,
     /// The inclusion proof had no certification data.
@@ -127,8 +123,24 @@ impl fmt::Display for VerificationError {
             VerificationError::BurnTokenVerificationFailed(e) => {
                 write!(f, "burned source token verification failed: {e}")
             }
-            VerificationError::SplitAssetCountMismatch => {
-                write!(f, "asset count does not match split proof count")
+            VerificationError::SplitTokenTypeMismatch => {
+                write!(f, "output token type does not match source token type")
+            }
+            VerificationError::SplitBurnTransferMissing => {
+                write!(f, "burned source token has no burn transfer")
+            }
+            VerificationError::SplitManifestMissing => {
+                write!(f, "burn transfer carries no split manifest")
+            }
+            VerificationError::SplitManifestMalformed => write!(f, "split manifest malformed"),
+            VerificationError::SplitManifestLengthMismatch => {
+                write!(f, "manifest root count does not match source asset count")
+            }
+            VerificationError::SplitProofCountMismatch => {
+                write!(f, "proof count does not match output asset count")
+            }
+            VerificationError::SplitAllocationProofInvalid => {
+                write!(f, "RSMST allocation proof did not verify")
             }
             VerificationError::SplitSourcePaymentDataMissing => {
                 write!(f, "burned source token has no valid payment data")
@@ -137,38 +149,10 @@ impl fmt::Display for VerificationError {
                 write!(f, "split asset is absent from burned source token")
             }
             VerificationError::SplitSourceAmountMismatch => {
-                write!(
-                    f,
-                    "split sum-tree total does not match burned source amount"
-                )
-            }
-            VerificationError::DuplicateSplitProof => write!(f, "duplicate split proof for asset"),
-            VerificationError::SplitAggregationPathInvalid => {
-                write!(f, "split aggregation path invalid")
-            }
-            VerificationError::SplitAssetTreePathInvalid => {
-                write!(f, "split asset tree path invalid")
-            }
-            VerificationError::SplitProofRootMismatch => {
-                write!(f, "split proofs derive from different aggregation trees")
-            }
-            VerificationError::SplitAssetTreeRootMismatch => {
-                write!(f, "asset tree root does not match aggregation path leaf")
-            }
-            VerificationError::SplitAssetNotInPayment => {
-                write!(f, "split proof asset id not present in payment data")
-            }
-            VerificationError::SplitAssetAmountMismatch => {
-                write!(f, "split proof amount does not match payment data")
+                write!(f, "reconstructed root sum does not match burned source amount")
             }
             VerificationError::SplitBurnPredicateMismatch => {
-                write!(
-                    f,
-                    "burned token not locked to split aggregation-root burn predicate"
-                )
-            }
-            VerificationError::SplitProofsIncomplete => {
-                write!(f, "some split proofs are missing from the token")
+                write!(f, "burned token not locked to split manifest burn predicate")
             }
             VerificationError::InclusionCertificateMissing => {
                 write!(f, "inclusion certificate missing")

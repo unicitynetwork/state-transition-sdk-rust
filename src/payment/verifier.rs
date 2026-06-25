@@ -1,31 +1,37 @@
 //! [`SplitMintJustificationVerifier`]: the security-critical check that a
 //! split-minted token is a legitimate output of burning a real source token.
 //!
-//! Faithful port of the reference `SplitMintJustificationVerifier`. The chain of
-//! evidence it enforces:
+//! The chain of evidence it enforces (yellowpaper "Split Mint-Reason
+//! Verification"):
 //!
-//! 1. the burned **source token fully verifies** against the trust base (so its
-//!    value was real and is now provably destroyed);
-//! 2. the source token's final state is a **burn predicate whose reason is the
-//!    aggregation-tree root** — binding the burn to *exactly* this set of
-//!    outputs and no other;
-//! 3. for every asset, an **aggregation path** (asset id → asset-tree root) and
-//!    an **asset-tree path** (this minted token's id → amount) both verify, all
-//!    proofs share one aggregation root, and the certified amounts match the
-//!    minted token's declared payment data.
+//! 1. the output declares a **non-empty canonical asset collection** as its
+//!    payload;
+//! 2. the burned **source token fully verifies** against the trust base
+//!    (recursively, so a split of a split is checked end to end), on the same
+//!    network as the output;
+//! 3. the source ends in a certified **burn transfer** whose auxiliary data is
+//!    the exact split manifest `b_M` and whose recipient is
+//!    `burn(SHA-256(b_M))` — binding the burn to *exactly* this ordered vector
+//!    of per-asset allocation roots;
+//! 4. the output **token type equals the source token type**, byte for byte;
+//! 5. the source payload is canonical and has exactly one manifest root per
+//!    asset; and
+//! 6. for every output asset, in canonical order, its **RSMST allocation proof**
+//!    verifies against the matching manifest root using the recomputed output
+//!    commitment `d_j`, and the proof's reconstructed **root sum equals the
+//!    source amount** for that asset (the verifier-side value-conservation rule).
 //!
 //! Any deviation rejects the mint, so a forged or over-issued split cannot pass.
 
 use alloc::boxed::Box;
-use alloc::collections::BTreeSet;
-use alloc::vec::Vec;
 
 use super::asset::PaymentAssetCollection;
+use super::commitment::commitment_for_mint;
 use super::justification::{SplitMintJustification, SPLIT_MINT_JUSTIFICATION_TAG};
+use super::manifest::SplitManifest;
 use crate::error::Error;
 use crate::predicate::builtin::BurnPredicate;
 use crate::predicate::EncodedPredicate;
-use crate::smt::bigint::key_to_path;
 use crate::transaction::ids::TokenType;
 use crate::transaction::{CertifiedMintTransaction, Token};
 use crate::verify::{
@@ -34,7 +40,8 @@ use crate::verify::{
 };
 use crate::VerificationError;
 
-/// Decoder from a token's mint `data` bytes to its [`PaymentAssetCollection`].
+/// Decoder from a token's mint `data` bytes to its [`PaymentAssetCollection`]
+/// (the `Assets(ty, auxd')` function).
 ///
 /// The default ([`PaymentAssetCollection::from_cbor_bytes`]) treats the mint
 /// `data` as exactly the encoded collection; supply a custom decoder if the
@@ -158,138 +165,108 @@ impl MintJustificationVerifier for SplitMintJustificationVerifier {
         context: &mut VerificationContext<'_>,
     ) -> Result<(), VerificationError> {
         let mint = genesis.transaction();
+        let limits = context.policy().limits.decode;
 
         let justification_bytes = mint
             .justification()
             .ok_or(VerificationError::MalformedMintJustification)?;
-        let justification = SplitMintJustification::from_cbor_with_limits(
-            justification_bytes,
-            context.policy().limits.decode,
-        )
-        .map_err(|_| VerificationError::MalformedMintJustification)?;
+        let justification =
+            SplitMintJustification::from_cbor_with_limits(justification_bytes, limits)
+                .map_err(|_| VerificationError::MalformedMintJustification)?;
 
-        // The minted token must declare the payment (assets) it received.
-        let payment_bytes = mint.data().ok_or(VerificationError::PaymentDataMissing)?;
-        if payment_bytes.len() > context.policy().limits.decode.max_input_bytes {
+        // (1) The minted token must declare a non-empty canonical asset payload.
+        let output_payment_bytes = mint.data().ok_or(VerificationError::PaymentDataMissing)?;
+        if output_payment_bytes.len() > limits.max_input_bytes {
             return Err(VerificationError::VerificationLimitExceeded(
                 "payment data bytes",
             ));
         }
-        let assets = (self.decode_payment_data)(payment_bytes)
+        let output_assets = (self.decode_payment_data)(output_payment_bytes)
             .map_err(|_| VerificationError::MalformedTokenData)?;
 
+        let burned = justification.token();
+
         // Mint and source token must live on the same network.
-        if mint.network_id() != justification.token().genesis().transaction().network_id() {
+        if mint.network_id() != burned.genesis().transaction().network_id() {
             return Err(VerificationError::SplitNetworkMismatch);
         }
 
-        // The burned source token must itself fully verify (recursively, so a
-        // split of a split is checked end to end).
+        // (2) The burned source token must itself fully verify (recursively, so
+        // a split of a split is checked end to end) under the same context.
         context
-            .verify_embedded_token(justification.token(), justification.encoded_token_len())
+            .verify_embedded_token(burned, justification.encoded_token_len())
             .map_err(|e| VerificationError::BurnTokenVerificationFailed(Box::new(e)))?;
 
-        let source_payment_bytes = justification
-            .token()
-            .genesis()
+        // (3) The source must end in a certified burn transfer carrying the exact
+        // manifest, locked to burn(SHA-256(b_M)).
+        let burn_transfer = burned
+            .transactions()
+            .last()
+            .ok_or(VerificationError::SplitBurnTransferMissing)?;
+        let manifest_bytes = burn_transfer
             .transaction()
             .data()
+            .ok_or(VerificationError::SplitManifestMissing)?;
+        if manifest_bytes.len() > limits.max_input_bytes {
+            return Err(VerificationError::VerificationLimitExceeded(
+                "split manifest bytes",
+            ));
+        }
+        let manifest = SplitManifest::from_cbor_bytes(manifest_bytes, limits)
+            .map_err(|_| VerificationError::SplitManifestMalformed)?;
+        let expected_burn = EncodedPredicate::from_predicate(&BurnPredicate::new(
+            manifest.reason_hash().to_vec(),
+        ));
+        if burn_transfer.recipient() != &expected_burn {
+            return Err(VerificationError::SplitBurnPredicateMismatch);
+        }
+
+        // (4) Output token type must be byte-identical to the source token type.
+        let source = burned.genesis().transaction();
+        if mint.token_type() != source.token_type() {
+            return Err(VerificationError::SplitTokenTypeMismatch);
+        }
+
+        // (5) The source payload must be canonical with one manifest root each.
+        let source_payment_bytes = source
+            .data()
             .ok_or(VerificationError::SplitSourcePaymentDataMissing)?;
-        if source_payment_bytes.len() > context.policy().limits.decode.max_input_bytes {
+        if source_payment_bytes.len() > limits.max_input_bytes {
             return Err(VerificationError::VerificationLimitExceeded(
                 "source payment data bytes",
             ));
         }
         let source_assets = (self.decode_payment_data)(source_payment_bytes)
             .map_err(|_| VerificationError::SplitSourcePaymentDataMissing)?;
-
-        if assets.len() != justification.proofs().len() {
-            return Err(VerificationError::SplitAssetCountMismatch);
+        if source_assets.len() != manifest.len() {
+            return Err(VerificationError::SplitManifestLengthMismatch);
         }
 
-        let token_id_path = key_to_path(mint.token_id().bytes());
-        let aggregation_root = justification
-            .proofs()
-            .first()
-            .map(|p| p.aggregation_path().root());
-        let last_recipient = justification
-            .token()
-            .transactions()
-            .last()
-            .map(|t| t.recipient());
+        // The number of proofs must equal the number of output assets; proofs are
+        // associated with assets purely by canonical order.
+        if justification.proofs().len() != output_assets.len() {
+            return Err(VerificationError::SplitProofCountMismatch);
+        }
 
-        let mut validated: BTreeSet<Vec<u8>> = BTreeSet::new();
-        for proof in justification.proofs() {
-            let asset_key = proof.asset_id().bytes().to_vec();
-            if validated.contains(&asset_key) {
-                return Err(VerificationError::DuplicateSplitProof);
-            }
+        // (6) Verify each allocation proof against its manifest root, and require
+        // the reconstructed root sum to equal the authenticated source amount.
+        let output_id = mint.token_id();
+        let commitment = commitment_for_mint(burned.id(), mint)
+            .map_err(|_| VerificationError::PaymentDataMissing)?;
 
-            // Asset id is committed in the aggregation tree.
-            if !proof
-                .aggregation_path()
-                .verify(&proof.asset_id().to_path())
-                .is_successful()
-            {
-                return Err(VerificationError::SplitAggregationPathInvalid);
-            }
-
-            // This minted token's id is committed in the asset's sum tree.
-            let asset_path_result = proof.asset_tree_path().verify(&token_id_path);
-            if !asset_path_result.is_successful() {
-                return Err(VerificationError::SplitAssetTreePathInvalid);
-            }
-
-            // All proofs must share one aggregation tree.
-            if Some(proof.aggregation_path().root()) != aggregation_root {
-                return Err(VerificationError::SplitProofRootMismatch);
-            }
-
-            // The asset-tree root must be the leaf committed in the aggregation
-            // path (binding the two layers together).
-            if Some(proof.asset_tree_path().root().imprint().as_slice())
-                != proof
-                    .aggregation_path()
-                    .steps()
-                    .first()
-                    .and_then(|s| s.data())
-            {
-                return Err(VerificationError::SplitAssetTreeRootMismatch);
-            }
-
-            // The certified amount must match the declared payment amount.
-            let amount = assets
-                .get(proof.asset_id())
-                .map(|a| a.value())
-                .ok_or(VerificationError::SplitAssetNotInPayment)?;
-            if proof.asset_tree_path().steps().first().map(|s| s.value()) != Some(amount) {
-                return Err(VerificationError::SplitAssetAmountMismatch);
-            }
-
-            // The sum committed by this asset tree must equal the amount that
-            // existed in the burned source. This is the verifier-side value
-            // conservation check; client-side split construction is untrusted.
-            let source_amount = source_assets
-                .get(proof.asset_id())
-                .map(|asset| asset.value())
+        for (asset, proof) in output_assets.as_slice().iter().zip(justification.proofs()) {
+            let index = source_assets
+                .as_slice()
+                .iter()
+                .position(|source_asset| source_asset.id() == asset.id())
                 .ok_or(VerificationError::SplitSourceAssetMissing)?;
-            if asset_path_result.root_sum() != Some(source_amount) {
+            let root = &manifest.roots()[index];
+            let root_sum = proof
+                .verify(output_id.bytes(), &commitment, asset.value(), root)
+                .ok_or(VerificationError::SplitAllocationProofInvalid)?;
+            if &root_sum != source_assets.as_slice()[index].value() {
                 return Err(VerificationError::SplitSourceAmountMismatch);
             }
-
-            // The source token must have been burned to this aggregation root.
-            let expected_recipient = EncodedPredicate::from_predicate(&BurnPredicate::new(
-                proof.aggregation_path().root().imprint(),
-            ));
-            if last_recipient != Some(&expected_recipient) {
-                return Err(VerificationError::SplitBurnPredicateMismatch);
-            }
-
-            validated.insert(asset_key);
-        }
-
-        if validated.len() != assets.len() {
-            return Err(VerificationError::SplitProofsIncomplete);
         }
 
         Ok(())

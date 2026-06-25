@@ -1,7 +1,7 @@
-//! End-to-end token-split tests: build a payment-carrying token, split it,
-//! mint each output with a [`SplitMintJustification`], and verify the outputs
-//! against the trust base through the registered split verifier. Negative cases
-//! confirm each split rule rejects its forgery.
+//! End-to-end token-split tests: build a payment-carrying token, split it into
+//! per-asset RSMST allocations, mint each output with a [`SplitMintJustification`],
+//! and verify the outputs against the trust base through the registered split
+//! verifier. Negative cases confirm each split rule rejects its forgery.
 
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
@@ -11,9 +11,9 @@ use alloc::vec::Vec;
 use num_bigint::BigUint;
 
 use super::{
-    verify_payment_token, Asset, AssetId, PaymentAssetCollection, PaymentDataVerifier,
-    SplitAssetProof, SplitMintJustification, SplitMintJustificationVerifier, SplitTokenRequest,
-    TokenSplit,
+    split_output_commitment, verify_payment_token, Asset, AssetId, PaymentAssetCollection,
+    PaymentDataVerifier, SplitManifest, SplitMintJustification, SplitMintJustificationVerifier,
+    SplitTokenRequest, TokenSplit,
 };
 use crate::api::bft::{
     InputRecord, RootTrustBase, RootTrustBaseNodeInfo, ShardId, ShardTreeCertificate,
@@ -26,10 +26,8 @@ use crate::crypto::signer::{Secp256k1Signer, Signer};
 use crate::predicate::builtin::{BurnPredicate, SignaturePredicate};
 use crate::predicate::unlock::sign_signature_unlock;
 use crate::predicate::EncodedPredicate;
-use crate::smt::bigint::key_to_path;
-use crate::smt::plain::SparseMerkleTree;
-use crate::smt::sum::SparseMerkleSumTree;
-use crate::transaction::ids::{TokenSalt, TokenType};
+use crate::rsmst::build::Rsmst;
+use crate::transaction::ids::{TokenId, TokenSalt, TokenType};
 use crate::transaction::{
     CertifiedMintTransaction, CertifiedTransferTransaction, MintTransaction, Minter, Token,
     Transaction, TransferTransaction,
@@ -145,6 +143,12 @@ fn valid_proof(
 
 // --- scenario builders ------------------------------------------------------
 
+/// Source/output token type. Splitting is never a type conversion, so the source
+/// and every output share one coin token type.
+fn coin_type() -> TokenType {
+    TokenType::new(vec![0xC0; 32])
+}
+
 fn asset_a() -> AssetId {
     AssetId::new(vec![0xAA; 32])
 }
@@ -162,7 +166,7 @@ fn source_token(node: &Secp256k1Signer, owner: &Secp256k1Signer) -> Token {
     let mint = MintTransaction::create(
         NetworkId::LOCAL,
         sig_pred(owner),
-        TokenType::new(vec![0xC0; 32]),
+        coin_type(),
         TokenSalt::from_bytes([0x01; 32]),
         Some(payment.to_cbor()),
         None,
@@ -211,17 +215,15 @@ fn mint_output(
     Token::new(CertifiedMintTransaction::new(mint, proof), Vec::new())
 }
 
-fn registry(_tb: &RootTrustBase) -> MintJustificationRegistry {
+fn registry() -> MintJustificationRegistry {
     let mut r = MintJustificationRegistry::new();
     r.register(Box::new(SplitMintJustificationVerifier::new()))
         .unwrap();
-    for byte in [0xC0, 0xC1, 0xC2] {
-        r.register_token_data(Box::new(PaymentDataVerifier::new(
-            TokenType::new(vec![byte; 32]),
-            authorize_test_payment,
-        )))
-        .unwrap();
-    }
+    r.register_token_data(Box::new(PaymentDataVerifier::new(
+        coin_type(),
+        authorize_test_payment,
+    )))
+    .unwrap();
     r
 }
 
@@ -255,13 +257,13 @@ fn scenario() -> Scenario {
             Asset::new(asset_b(), BigUint::from(50u32)),
         ])
         .unwrap(),
-        TokenType::new(vec![0xC1; 32]),
+        coin_type(),
         TokenSalt::from_bytes([0x10; 32]),
     );
     let req2 = SplitTokenRequest::create(
         sig_pred(&carol),
         PaymentAssetCollection::create([Asset::new(asset_a(), BigUint::from(40u32))]).unwrap(),
-        TokenType::new(vec![0xC2; 32]),
+        coin_type(),
         TokenSalt::from_bytes([0x20; 32]),
     );
 
@@ -274,48 +276,58 @@ fn scenario() -> Scenario {
     }
 }
 
+/// Forge a single-asset output by hand-building an RSMST allocation that claims
+/// `amount` of `asset_id`, then minting against it. The forged manifest carries
+/// one root per source asset (the second is a dummy) so it passes the structural
+/// length check and the relevant per-asset rule is reached.
 fn forged_single_asset_output(s: &Scenario, asset_id: AssetId, amount: u32) -> Token {
-    let recipient = signer(0x55);
+    forged_output_with_type(s, asset_id, amount, coin_type())
+}
+
+fn forged_output_with_type(
+    s: &Scenario,
+    asset_id: AssetId,
+    amount: u32,
+    token_type: TokenType,
+) -> Token {
+    let recipient = sig_pred(&signer(0x55));
     let salt = TokenSalt::from_bytes([0x31; 32]);
-    let token_type = TokenType::new(vec![0xC1; 32]);
-    let token_id = crate::transaction::ids::TokenId::derive(NetworkId::LOCAL, &salt);
-    let token_id_path = key_to_path(token_id.bytes());
+    let token_id = TokenId::derive(NetworkId::LOCAL, &salt);
+    let assets =
+        PaymentAssetCollection::create([Asset::new(asset_id, BigUint::from(amount))]).unwrap();
+    let commitment = split_output_commitment(
+        s.source.id(),
+        NetworkId::LOCAL,
+        &recipient,
+        &salt,
+        &token_id,
+        &token_type,
+        &assets.to_cbor(),
+    );
 
-    let mut asset_tree = SparseMerkleSumTree::new();
-    asset_tree
-        .add_leaf(
-            token_id_path.clone(),
-            asset_id.bytes().to_vec(),
-            BigUint::from(amount),
-        )
+    let mut tree = Rsmst::new();
+    tree.insert(*token_id.bytes(), commitment, BigUint::from(amount))
         .unwrap();
-    let asset_root = asset_tree.calculate_root();
-    let mut aggregation_tree = SparseMerkleTree::new();
-    aggregation_tree
-        .add_leaf(asset_id.to_path(), asset_root.hash().imprint())
-        .unwrap();
-    let aggregation_root = aggregation_tree.calculate_root();
+    let built = tree.build().unwrap();
+    let proof = built.proof(token_id.bytes()).unwrap();
 
+    // Source has two assets (asset_a, asset_b in canonical order); align the
+    // forged root at index 0 and pad index 1 with a dummy root.
+    let manifest = SplitManifest::create(vec![built.root_hash(), [0u8; 32]]).unwrap();
+    let burn_predicate = BurnPredicate::new(manifest.reason_hash().to_vec());
     let (source_state_hash, lock_script) = s.source.latest_state();
     let burn = TransferTransaction::new(
         source_state_hash,
         lock_script,
-        BurnPredicate::new(aggregation_root.hash().imprint()).to_encoded(),
+        burn_predicate.to_encoded(),
         vec![9u8; 32],
-        None,
+        Some(manifest.to_cbor()),
     );
     let burned = burned_token(&s.source, burn, &s.alice, &s.node);
-    let proof = SplitAssetProof::new(
-        asset_id.clone(),
-        aggregation_root.get_path(&asset_id.to_path()),
-        asset_root.get_path(&token_id_path),
-    );
     let justification = SplitMintJustification::create(burned, vec![proof]).unwrap();
-    let assets =
-        PaymentAssetCollection::create([Asset::new(asset_id, BigUint::from(amount))]).unwrap();
     mint_output(
         NetworkId::LOCAL,
-        sig_pred(&recipient),
+        recipient,
         token_type,
         salt,
         &assets,
@@ -330,7 +342,7 @@ fn forged_single_asset_output(s: &Scenario, asset_id: AssetId, amount: u32) -> T
 fn split_outputs_verify_end_to_end() {
     let s = scenario();
     assert_eq!(s.source.verify(&s.tb), Ok(()), "source token should verify");
-    let registry = registry(&s.tb);
+    let registry = registry();
     assert_eq!(
         verify_payment_token(
             &s.source,
@@ -411,10 +423,7 @@ fn payment_verification_enforces_issuance_policy() {
     let s = scenario();
     let mut registry = MintJustificationRegistry::new();
     registry
-        .register_token_data(Box::new(PaymentDataVerifier::new(
-            TokenType::new(vec![0xC0; 32]),
-            reject,
-        )))
+        .register_token_data(Box::new(PaymentDataVerifier::new(coin_type(), reject)))
         .unwrap();
     assert_eq!(
         verify_payment_token(
@@ -458,7 +467,7 @@ fn recursive_split_verification_honors_shared_depth_limit() {
     };
 
     assert_eq!(
-        verify_token_with_policy(&token, &s.tb, &registry(&s.tb), policy),
+        verify_token_with_policy(&token, &s.tb, &registry(), policy),
         Err(VerificationError::BurnTokenVerificationFailed(Box::new(
             VerificationError::VerificationLimitExceeded("embedded token depth")
         )))
@@ -466,13 +475,13 @@ fn recursive_split_verification_honors_shared_depth_limit() {
 }
 
 #[test]
-fn rejects_inflated_sum_tree_built_without_split_builder() {
+fn rejects_inflated_allocation_built_without_split_builder() {
     let s = scenario();
     // Forge a tree claiming 1,000 units although the source owns only 100.
     let token = forged_single_asset_output(&s, asset_a(), 1_000);
 
     assert_eq!(
-        token.verify_with(&s.tb, &registry(&s.tb)),
+        token.verify_with(&s.tb, &registry()),
         Err(VerificationError::SplitSourceAmountMismatch)
     );
 }
@@ -483,7 +492,7 @@ fn rejects_asset_absent_from_burned_source() {
     let token = forged_single_asset_output(&s, AssetId::new(vec![0xCC; 32]), 10);
 
     assert_eq!(
-        token.verify_with(&s.tb, &registry(&s.tb)),
+        token.verify_with(&s.tb, &registry()),
         Err(VerificationError::SplitSourceAssetMissing)
     );
 }
@@ -499,11 +508,11 @@ fn rejects_tampered_output_amount() {
     )
     .unwrap();
     let burned = burned_token(&s.source, split.burn.transaction.clone(), &s.alice, &s.node);
-    let registry = registry(&s.tb);
+    let registry = registry();
 
     let out = &split.tokens[0];
     let just = SplitMintJustification::create(burned, out.proofs.clone()).unwrap();
-    // Declare more of asset A than the proofs certify.
+    // Declare a different amount of asset A than the proof (and commitment) cover.
     let inflated = PaymentAssetCollection::create([
         Asset::new(asset_a(), BigUint::from(61u32)),
         Asset::new(asset_b(), BigUint::from(50u32)),
@@ -520,7 +529,7 @@ fn rejects_tampered_output_amount() {
     );
     assert_eq!(
         token.verify_with(&s.tb, &registry),
-        Err(VerificationError::SplitAssetAmountMismatch)
+        Err(VerificationError::SplitAllocationProofInvalid)
     );
 }
 
@@ -535,7 +544,7 @@ fn rejects_dropped_proof() {
     )
     .unwrap();
     let burned = burned_token(&s.source, split.burn.transaction.clone(), &s.alice, &s.node);
-    let registry = registry(&s.tb);
+    let registry = registry();
 
     let out = &split.tokens[0]; // has two assets / two proofs
     let mut proofs = out.proofs.clone();
@@ -552,7 +561,7 @@ fn rejects_dropped_proof() {
     );
     assert_eq!(
         token.verify_with(&s.tb, &registry),
-        Err(VerificationError::SplitAssetCountMismatch)
+        Err(VerificationError::SplitProofCountMismatch)
     );
 }
 
@@ -566,16 +575,17 @@ fn rejects_wrong_burn_predicate() {
         Some([7u8; 32]),
     )
     .unwrap();
-    let registry = registry(&s.tb);
+    let registry = registry();
 
-    // Burn the source to an unrelated burn predicate (not the aggregation root).
+    // Burn the source carrying the real manifest, but locked to an unrelated burn
+    // predicate (not SHA-256 of the manifest).
     let (source_state_hash, lock_script) = s.source.latest_state();
     let wrong_burn = TransferTransaction::new(
         source_state_hash,
         lock_script,
-        BurnPredicate::new(b"not-the-aggregation-root".to_vec()).to_encoded(),
+        BurnPredicate::new(b"not-the-manifest-hash".to_vec()).to_encoded(),
         vec![7u8; 32],
-        None,
+        Some(split.burn.manifest.clone()),
     );
     let burned = burned_token(&s.source, wrong_burn, &s.alice, &s.node);
     assert_eq!(
@@ -602,6 +612,118 @@ fn rejects_wrong_burn_predicate() {
 }
 
 #[test]
+fn rejects_output_token_type_mismatch_at_verify() {
+    let s = scenario();
+    // A self-consistent forged output whose token type differs from the source:
+    // construction-time checks are bypassed, but the verifier still rejects it.
+    let token = forged_output_with_type(&s, asset_a(), 100, TokenType::new(vec![0xC9; 32]));
+    assert_eq!(
+        token.verify_with(&s.tb, &registry()),
+        Err(VerificationError::SplitTokenTypeMismatch)
+    );
+}
+
+#[test]
+fn rejects_missing_manifest() {
+    let s = scenario();
+    let split = TokenSplit::split(
+        &s.source,
+        PaymentAssetCollection::from_cbor_bytes,
+        s.requests,
+        Some([7u8; 32]),
+    )
+    .unwrap();
+    // Burn with no auxiliary manifest data at all.
+    let (source_state_hash, lock_script) = s.source.latest_state();
+    let burn = TransferTransaction::new(
+        source_state_hash,
+        lock_script,
+        BurnPredicate::new(b"x".to_vec()).to_encoded(),
+        vec![3u8; 32],
+        None,
+    );
+    let burned = burned_token(&s.source, burn, &s.alice, &s.node);
+    let out = &split.tokens[0];
+    let just = SplitMintJustification::create(burned, out.proofs.clone()).unwrap();
+    let token = mint_output(
+        out.network_id,
+        out.recipient.clone(),
+        out.token_type.clone(),
+        out.salt.clone(),
+        &out.assets,
+        &just,
+        &s.node,
+    );
+    assert_eq!(
+        token.verify_with(&s.tb, &registry()),
+        Err(VerificationError::SplitManifestMissing)
+    );
+}
+
+#[test]
+fn rejects_manifest_length_mismatch() {
+    let s = scenario();
+    let split = TokenSplit::split(
+        &s.source,
+        PaymentAssetCollection::from_cbor_bytes,
+        s.requests,
+        Some([7u8; 32]),
+    )
+    .unwrap();
+    // A self-consistent burn whose manifest has one root, although the source
+    // carries two assets.
+    let short = SplitManifest::create(vec![[0u8; 32]]).unwrap();
+    let (source_state_hash, lock_script) = s.source.latest_state();
+    let burn = TransferTransaction::new(
+        source_state_hash,
+        lock_script,
+        BurnPredicate::new(short.reason_hash().to_vec()).to_encoded(),
+        vec![4u8; 32],
+        Some(short.to_cbor()),
+    );
+    let burned = burned_token(&s.source, burn, &s.alice, &s.node);
+    let out = &split.tokens[0];
+    let just = SplitMintJustification::create(burned, out.proofs.clone()).unwrap();
+    let token = mint_output(
+        out.network_id,
+        out.recipient.clone(),
+        out.token_type.clone(),
+        out.salt.clone(),
+        &out.assets,
+        &just,
+        &s.node,
+    );
+    assert_eq!(
+        token.verify_with(&s.tb, &registry()),
+        Err(VerificationError::SplitManifestLengthMismatch)
+    );
+}
+
+#[test]
+fn rejects_wrong_output_token_type() {
+    let s = scenario();
+    // A split request whose output type differs from the source is rejected at
+    // construction (splitting is not a token-type conversion).
+    let bad = vec![SplitTokenRequest::create(
+        sig_pred(&signer(0x33)),
+        PaymentAssetCollection::create([
+            Asset::new(asset_a(), BigUint::from(100u32)),
+            Asset::new(asset_b(), BigUint::from(50u32)),
+        ])
+        .unwrap(),
+        TokenType::new(vec![0xC9; 32]),
+        TokenSalt::from_bytes([0x10; 32]),
+    )];
+    assert!(TokenSplit::split(
+        &s.source,
+        PaymentAssetCollection::from_cbor_bytes,
+        bad,
+        Some([7u8; 32]),
+    )
+    .is_err());
+}
+
+#[test]
 fn rejects_unbalanced_split_at_build_time() {
     let s = scenario();
     let bob = signer(0x33);
@@ -613,7 +735,7 @@ fn rejects_unbalanced_split_at_build_time() {
             Asset::new(asset_b(), BigUint::from(50u32)),
         ])
         .unwrap(),
-        TokenType::new(vec![0xC1; 32]),
+        coin_type(),
         TokenSalt::from_bytes([0x10; 32]),
     )];
     assert!(TokenSplit::split(
