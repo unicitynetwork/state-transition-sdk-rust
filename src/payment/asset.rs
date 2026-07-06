@@ -106,7 +106,10 @@ impl Asset {
 
     /// Encode to CBOR: `[bstr(id), bstr(value)]`.
     fn to_cbor(&self) -> Vec<u8> {
-        encode_array(&[&self.id.to_cbor(), &encode_byte_string(&encode_amount(&self.value))])
+        encode_array(&[
+            &self.id.to_cbor(),
+            &encode_byte_string(&encode_amount(&self.value)),
+        ])
     }
 }
 

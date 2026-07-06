@@ -192,17 +192,18 @@ impl BuiltRsmst {
                     });
                 }
                 Node::Branch {
-                    depth,
-                    left,
-                    right,
-                    ..
+                    depth, left, right, ..
                 } => {
                     let (sibling, next): (&Node, &Node) = if key_bit(key, *depth) {
                         (left, right)
                     } else {
                         (right, left)
                     };
-                    steps.push(RsmstProofStep::new(*depth, *sibling.hash(), sibling.sum().clone()));
+                    steps.push(RsmstProofStep::new(
+                        *depth,
+                        *sibling.hash(),
+                        sibling.sum().clone(),
+                    ));
                     node = next;
                 }
             }
@@ -230,7 +231,10 @@ mod tests {
         tree.insert(k, d, BigUint::from(42u32)).unwrap();
         let built = tree.build().unwrap();
         assert_eq!(*built.root_sum(), BigUint::from(42u32));
-        assert_eq!(built.root_hash(), leaf_hash(&k, &d, &BigUint::from(42u32)).unwrap());
+        assert_eq!(
+            built.root_hash(),
+            leaf_hash(&k, &d, &BigUint::from(42u32)).unwrap()
+        );
         let proof = built.proof(&k).unwrap();
         assert!(proof.steps().is_empty());
         assert_eq!(
@@ -278,7 +282,9 @@ mod tests {
         let k = key(&[(31, 1)]);
         tree.insert(k, [0; 32], BigUint::from(1u32)).unwrap();
         assert!(tree.insert(k, [1; 32], BigUint::from(2u32)).is_err());
-        assert!(tree.insert(key(&[(31, 2)]), [0; 32], BigUint::ZERO).is_err());
+        assert!(tree
+            .insert(key(&[(31, 2)]), [0; 32], BigUint::ZERO)
+            .is_err());
     }
 
     /// Golden cross-implementation vector. The digests below were computed

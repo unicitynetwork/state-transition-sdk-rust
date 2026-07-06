@@ -59,9 +59,9 @@ pub fn split_output_commitment(
 /// Errors if the output carries no auxiliary payload (a split output must always
 /// declare the non-empty canonical asset collection it receives).
 pub fn commitment_for_mint(source_id: &TokenId, mint: &MintTransaction) -> Result<[u8; 32], Error> {
-    let aux_data = mint
-        .data()
-        .ok_or(Error::UnexpectedValue("split output has no auxiliary payload"))?;
+    let aux_data = mint.data().ok_or(Error::UnexpectedValue(
+        "split output has no auxiliary payload",
+    ))?;
     Ok(split_output_commitment(
         source_id,
         mint.network_id(),

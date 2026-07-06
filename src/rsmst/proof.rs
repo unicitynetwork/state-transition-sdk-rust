@@ -57,14 +57,15 @@ impl RsmstProofStep {
         let items = d.array(Some(3))?;
         let depth = u8::try_from(items[0].uint()?)
             .map_err(|_| Error::OutOfRange("RSMST proof depth exceeds 255"))?;
-        let hash: [u8; 32] = items[1]
-            .bytes_value()?
-            .try_into()
-            .map_err(|_| Error::InvalidLength {
-                what: "RSMST sibling hash",
-                expected: 32,
-                actual: 0,
-            })?;
+        let hash: [u8; 32] =
+            items[1]
+                .bytes_value()?
+                .try_into()
+                .map_err(|_| Error::InvalidLength {
+                    what: "RSMST sibling hash",
+                    expected: 32,
+                    actual: 0,
+                })?;
         let sum = decode_positive_amount(items[2].bytes_value()?)?;
         Ok(RsmstProofStep { depth, hash, sum })
     }
