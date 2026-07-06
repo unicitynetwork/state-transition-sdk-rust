@@ -730,7 +730,6 @@ dependencies = [
  "hex-literal",
  "k256",
  "num-bigint",
- "num-traits",
  "serde_json",
  "sha2",
  "ureq",

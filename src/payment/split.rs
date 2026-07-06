@@ -1,27 +1,34 @@
 //! Client-side token splitting (`client` feature).
 //!
-//! [`TokenSplit::split`] burns a payment-carrying token and produces the data
-//! needed to mint several new tokens whose assets sum to the original. It builds
-//! a sum tree per asset (token id → amount) and a plain aggregation tree over
-//! the asset-tree roots; the aggregation root becomes the burn predicate's
-//! reason, and each output carries [`SplitAssetProof`]s extracted from those
-//! trees. The result is exactly what [`SplitMintJustificationVerifier`] checks.
+//! [`TokenSplit::split`] burns a payment-carrying token and produces everything
+//! needed to mint several new tokens whose per-asset allocations sum to the
+//! original. For every source asset it builds one radix sparse Merkle sum tree
+//! ([`Rsmst`]) keyed by output token id; the per-asset root hashes form the
+//! *split manifest*, whose hash becomes the burn predicate's reason and whose
+//! exact bytes are stored as the burn transfer's auxiliary data. Each output
+//! carries one [`RsmstInclusionProof`] per asset it receives. The result is
+//! exactly what [`SplitMintJustificationVerifier`] re-checks.
 //!
 //! [`SplitMintJustificationVerifier`]: super::verifier::SplitMintJustificationVerifier
 
 use alloc::vec::Vec;
+use core::fmt;
 
-use super::asset::{AssetId, PaymentAssetCollection};
-use super::proof::SplitAssetProof;
+use super::asset::PaymentAssetCollection;
+use super::commitment::split_output_commitment;
+use super::manifest::SplitManifest;
+use super::verifier::{verify_payment_token, PaymentDataDecoder};
+use crate::api::bft::RootTrustBase;
 use crate::api::network_id::NetworkId;
 use crate::error::Error;
 use crate::predicate::builtin::BurnPredicate;
 use crate::predicate::EncodedPredicate;
-use crate::smt::bigint::key_to_path;
-use crate::smt::plain::SparseMerkleTree;
-use crate::smt::sum::SparseMerkleSumTree;
+use crate::rsmst::build::Rsmst;
+use crate::rsmst::RsmstInclusionProof;
 use crate::transaction::ids::{TokenId, TokenSalt, TokenType};
 use crate::transaction::{Token, TransferTransaction};
+use crate::verify::MintJustificationRegistry;
+use crate::VerificationError;
 
 /// A request to mint one new token as part of a split.
 #[derive(Debug, Clone)]
@@ -34,7 +41,8 @@ pub struct SplitTokenRequest {
 
 impl SplitTokenRequest {
     /// Create a request: `recipient` locks the new token, which receives
-    /// `assets` and is identified by `token_type` and `salt`.
+    /// `assets` and is identified by `token_type` and `salt`. `token_type` must
+    /// equal the source token type (splitting is not a type-conversion).
     pub fn create(
         recipient: EncodedPredicate,
         assets: PaymentAssetCollection,
@@ -61,19 +69,21 @@ pub struct SplitToken {
     pub token_type: TokenType,
     /// Salt of the new token.
     pub salt: TokenSalt,
-    /// Assets the new token receives.
+    /// Assets the new token receives (canonical order).
     pub assets: PaymentAssetCollection,
-    /// Inclusion proofs binding these assets to the burned source token.
-    pub proofs: Vec<SplitAssetProof>,
+    /// One allocation proof per asset, in canonical output-asset order.
+    pub proofs: Vec<RsmstInclusionProof>,
 }
 
 /// The burn side of a split: the predicate and transfer that destroy the source.
 #[derive(Debug, Clone)]
 pub struct SplitBurn {
-    /// The burn predicate (reason = aggregation-tree root imprint).
+    /// The burn predicate (reason = `SHA-256(b_M)`).
     pub owner_predicate: BurnPredicate,
-    /// The transfer that burns the source token.
+    /// The transfer that burns the source token (auxiliary data = `b_M`).
     pub transaction: TransferTransaction,
+    /// The exact canonical manifest encoding `b_M` stored by the burn transfer.
+    pub manifest: Vec<u8>,
 }
 
 /// The result of [`TokenSplit::split`].
@@ -85,89 +95,158 @@ pub struct Split {
     pub tokens: Vec<SplitToken>,
 }
 
+/// Why a split could not be produced (see [`TokenSplit::split`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SplitError {
+    /// The source token failed verification, so no burn was constructed. The
+    /// caller's value is untouched.
+    Verification(VerificationError),
+    /// The source verified, but the requested split could not be built (e.g. a
+    /// per-asset total does not equal the source amount, or a duplicate output
+    /// id). No burn was constructed.
+    Build(Error),
+}
+
+impl fmt::Display for SplitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SplitError::Verification(e) => write!(f, "source token verification failed: {e}"),
+            SplitError::Build(e) => write!(f, "split construction failed: {e}"),
+        }
+    }
+}
+
+impl core::error::Error for SplitError {}
+
 /// Token splitting.
 #[derive(Debug)]
 pub struct TokenSplit;
 
 impl TokenSplit {
-    /// Split `token` into the outputs described by `requests`.
+    /// Split `token` into the outputs described by `requests`, after fully
+    /// verifying the source token.
+    ///
+    /// The source token is verified with [`verify_payment_token`] — its whole
+    /// cryptographic history, any embedded split chain, and the registered
+    /// issuance policy for its token type — **before** the irreversible burn
+    /// transfer is constructed. If verification fails, no burn is produced and
+    /// the caller's value is untouched. `registry` must therefore hold the
+    /// payment-data verifier for the source token type (and the split verifier if
+    /// the source is itself a split output).
     ///
     /// `decode_payment_data` extracts the source token's [`PaymentAssetCollection`]
     /// from its mint `data`. `burn_state_mask` sets the burn transfer's state
     /// mask; pass `None` for a random mask (requires the `std` RNG) or a fixed
     /// value for a reproducible, crash-resumable burn.
+    ///
+    /// To split a token whose validity you have already established by other
+    /// means, use [`TokenSplit::split_unchecked`].
     pub fn split(
         token: &Token,
-        decode_payment_data: fn(&[u8]) -> Result<PaymentAssetCollection, Error>,
+        trust_base: &RootTrustBase,
+        registry: &MintJustificationRegistry,
+        decode_payment_data: PaymentDataDecoder,
+        requests: Vec<SplitTokenRequest>,
+        burn_state_mask: Option<[u8; 32]>,
+    ) -> Result<Split, SplitError> {
+        let assets = verify_payment_token(token, trust_base, registry, decode_payment_data)
+            .map_err(SplitError::Verification)?;
+        Self::build_split(token, assets, requests, burn_state_mask).map_err(SplitError::Build)
+    }
+
+    /// Split `token` **without verifying it first**.
+    ///
+    /// This constructs an irreversible burn transfer from an unverified source
+    /// token. Only use it when the source token's validity (and ownership of its
+    /// current state) is already established; otherwise prefer
+    /// [`TokenSplit::split`], which verifies before burning. The split outputs
+    /// are still independently checked by the verifier when later minted, but an
+    /// invalid source can only be discovered *after* value has been burned.
+    pub fn split_unchecked(
+        token: &Token,
+        decode_payment_data: PaymentDataDecoder,
         requests: Vec<SplitTokenRequest>,
         burn_state_mask: Option<[u8; 32]>,
     ) -> Result<Split, Error> {
-        let network_id = token.genesis().transaction().network_id();
-
-        // Derive each output's token id and reject duplicates.
-        let mut entries: Vec<(SplitTokenRequest, TokenId, num_bigint::BigUint)> = Vec::new();
-        for request in requests {
-            let token_id = TokenId::derive(network_id, &request.salt);
-            let token_id_path = key_to_path(token_id.bytes());
-            if entries.iter().any(|(_, _, p)| p == &token_id_path) {
-                return Err(Error::UnexpectedValue("duplicate split token id"));
-            }
-            entries.push((request, token_id, token_id_path));
-        }
-
-        // One sum tree per asset, mapping each output token id to its amount.
-        let mut trees: Vec<(AssetId, SparseMerkleSumTree)> = Vec::new();
-        for (request, _, token_id_path) in &entries {
-            for asset in request.assets.as_slice() {
-                let tree = match trees.iter_mut().find(|(id, _)| id == asset.id()) {
-                    Some((_, tree)) => tree,
-                    None => {
-                        trees.push((asset.id().clone(), SparseMerkleSumTree::new()));
-                        &mut trees.last_mut().expect("just pushed").1
-                    }
-                };
-                tree.add_leaf(
-                    token_id_path.clone(),
-                    asset.id().bytes().to_vec(),
-                    asset.value().clone(),
-                )?;
-            }
-        }
-
-        // The source token's declared payment must match the requested assets.
-        let payment_bytes = token
+        let source_bytes = token
             .genesis()
             .transaction()
             .data()
             .ok_or(Error::UnexpectedValue("source token has no payment data"))?;
-        let assets = decode_payment_data(payment_bytes)?;
-        if trees.len() != assets.len() {
-            return Err(Error::UnexpectedValue(
-                "asset count does not match source payment",
-            ));
+        let assets = decode_payment_data(source_bytes)?;
+        Self::build_split(token, assets, requests, burn_state_mask)
+    }
+
+    /// Construct the split from the source token's already-decoded canonical
+    /// asset collection. Shared by [`split`](Self::split) and
+    /// [`split_unchecked`](Self::split_unchecked).
+    fn build_split(
+        token: &Token,
+        assets: PaymentAssetCollection,
+        requests: Vec<SplitTokenRequest>,
+        burn_state_mask: Option<[u8; 32]>,
+    ) -> Result<Split, Error> {
+        let network_id = token.genesis().transaction().network_id();
+        let source_token_type = token.token_type().clone();
+
+        // Validate each request and derive its token id and output commitment.
+        let mut entries: Vec<(SplitTokenRequest, TokenId, [u8; 32])> = Vec::new();
+        for request in requests {
+            if request.token_type != source_token_type {
+                return Err(Error::UnexpectedValue(
+                    "split output token type must equal source token type",
+                ));
+            }
+            for asset in request.assets.as_slice() {
+                if assets.get(asset.id()).is_none() {
+                    return Err(Error::UnexpectedValue(
+                        "split output asset is absent from source token",
+                    ));
+                }
+            }
+            let token_id = TokenId::derive(network_id, &request.salt);
+            if entries.iter().any(|(_, id, _)| id == &token_id) {
+                return Err(Error::UnexpectedValue("duplicate split token id"));
+            }
+            let commitment = split_output_commitment(
+                token.id(),
+                network_id,
+                &request.recipient,
+                &request.salt,
+                &token_id,
+                &request.token_type,
+                &request.assets.to_cbor(),
+            );
+            entries.push((request, token_id, commitment));
         }
 
-        // Finalize each asset tree, checking value conservation, and aggregate
-        // the roots into a plain tree keyed by asset id.
-        let mut aggregation_tree = SparseMerkleTree::new();
-        let mut asset_tree_roots: Vec<(AssetId, crate::smt::sum::SparseMerkleSumTreeRootNode)> =
+        // One RSMST per source asset, in canonical asset order, checking value
+        // conservation. The per-asset root hashes form the manifest.
+        let mut roots: Vec<[u8; 32]> = Vec::new();
+        let mut built_trees: Vec<(super::asset::AssetId, crate::rsmst::build::BuiltRsmst)> =
             Vec::new();
-        for (asset_id, tree) in trees {
-            let token_asset = assets
-                .get(&asset_id)
-                .ok_or(Error::UnexpectedValue("source payment missing an asset"))?;
-            let root = tree.calculate_root();
-            if root.value() != token_asset.value() {
+        for source_asset in assets.as_slice() {
+            let mut tree = Rsmst::new();
+            for (request, token_id, commitment) in &entries {
+                if let Some(output_asset) = request.assets.get(source_asset.id()) {
+                    tree.insert(*token_id.bytes(), *commitment, output_asset.value().clone())?;
+                }
+            }
+            let built = tree.build().map_err(|_| {
+                Error::UnexpectedValue("source asset is not allocated to any output")
+            })?;
+            if built.root_sum() != source_asset.value() {
                 return Err(Error::UnexpectedValue(
                     "split asset total does not match source amount",
                 ));
             }
-            aggregation_tree.add_leaf(key_to_path(asset_id.bytes()), root.hash().imprint())?;
-            asset_tree_roots.push((asset_id, root));
+            roots.push(built.root_hash());
+            built_trees.push((source_asset.id().clone(), built));
         }
 
-        let aggregation_root = aggregation_tree.calculate_root();
-        let burn_predicate = BurnPredicate::new(aggregation_root.hash().imprint());
+        let manifest = SplitManifest::create(roots)?;
+        let manifest_bytes = manifest.to_cbor();
+        let burn_predicate = BurnPredicate::new(manifest.reason_hash().to_vec());
 
         let mask = match burn_state_mask {
             Some(m) => m,
@@ -179,23 +258,22 @@ impl TokenSplit {
             lock_script,
             burn_predicate.to_encoded(),
             mask.to_vec(),
-            None,
+            Some(manifest_bytes.clone()),
         );
 
-        // Build each output with its per-asset proofs.
+        // Build each output with its per-asset proofs (canonical output order).
         let mut tokens = Vec::new();
-        for (request, _token_id, token_id_path) in entries {
+        for (request, token_id, _commitment) in entries {
             let mut proofs = Vec::new();
             for asset in request.assets.as_slice() {
-                let (_, asset_root) = asset_tree_roots
+                let (_, built) = built_trees
                     .iter()
                     .find(|(id, _)| id == asset.id())
-                    .expect("asset tree built for every requested asset");
-                proofs.push(SplitAssetProof::new(
-                    asset.id().clone(),
-                    aggregation_root.get_path(&key_to_path(asset.id().bytes())),
-                    asset_root.get_path(&token_id_path),
-                ));
+                    .expect("a tree is built for every source asset");
+                let proof = built
+                    .proof(token_id.bytes())
+                    .ok_or(Error::UnexpectedValue("missing allocation proof for output"))?;
+                proofs.push(proof);
             }
             tokens.push(SplitToken {
                 network_id,
@@ -211,6 +289,7 @@ impl TokenSplit {
             burn: SplitBurn {
                 owner_predicate: burn_predicate,
                 transaction: burn_transaction,
+                manifest: manifest_bytes,
             },
             tokens,
         })
