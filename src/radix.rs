@@ -9,8 +9,12 @@
 //! Bit `i` is bit `i % 8` of byte `i / 8`: least significant bit first within
 //! each byte, byte 0 first.
 
+pub(crate) const KEY_BITS: usize = 256;
+pub(crate) const MAX_DEPTH: usize = KEY_BITS - 1;
+
 /// LSB-first bit `index` of a byte string: bit `index % 8` of byte `index / 8`.
 pub(crate) fn bit_at(data: &[u8], index: usize) -> bool {
+    assert!(index < data.len() * 8, "bit index out of range");
     (data[index / 8] >> (index % 8)) & 1 == 1
 }
 
@@ -21,6 +25,8 @@ pub(crate) fn bit_at(data: &[u8], index: usize) -> bool {
 /// later bits. For example, `depth == 0` is the empty prefix, and
 /// `depth == 255` keeps bits `0..254` while clearing bit 255.
 pub(crate) fn prefix_region(key: &[u8; 32], depth: usize) -> [u8; 32] {
+    assert!(depth <= MAX_DEPTH, "depth cannot exceed MAX_DEPTH");
+
     let mut region = [0u8; 32];
     let full_bytes = depth / 8;
     let partial_bits = depth % 8;
@@ -89,5 +95,19 @@ mod tests {
         let mut depth_255 = key;
         depth_255[31] = 0;
         assert_eq!(prefix_region(&key, 255), depth_255);
+    }
+
+    #[test]
+    #[should_panic(expected = "depth cannot exceed MAX_DEPTH")]
+    fn prefix_region_rejects_leaf_depth() {
+        let key = [0u8; 32];
+        let _ = prefix_region(&key, KEY_BITS);
+    }
+
+    #[test]
+    #[should_panic(expected = "bit index out of range")]
+    fn bit_at_rejects_out_of_range_index() {
+        let key = [0u8; 32];
+        let _ = bit_at(&key, KEY_BITS);
     }
 }

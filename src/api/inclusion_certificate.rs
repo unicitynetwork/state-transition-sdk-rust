@@ -14,9 +14,8 @@ use crate::error::Error;
 
 const BITMAP_SIZE: usize = 32;
 const HASH_SIZE: usize = 32;
-const MAX_DEPTH: usize = 255;
 
-use crate::radix::{bit_at, prefix_region};
+use crate::radix::{bit_at, prefix_region, MAX_DEPTH};
 
 /// A sparse-Merkle-tree inclusion path.
 #[derive(Debug, Clone, PartialEq, Eq)]
