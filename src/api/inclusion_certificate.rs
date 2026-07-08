@@ -2,7 +2,7 @@
 //! `(stateId -> transactionHash)` leaf is committed under a block's state root.
 //!
 //! Wire form (not CBOR-tagged): a 32-byte bitmap followed by the sibling hashes
-//! (32 bytes each). The bitmap's set bits — one per tree depth, LSB-first —
+//! (32 bytes each). The bitmap's set bits — one per tree depth, MSB-first —
 //! select which depths contribute a sibling; their count must equal the number
 //! of sibling hashes.
 
@@ -157,7 +157,7 @@ mod tests {
     fn two_leaf_inclusion_uses_v6a_region_commitment() {
         let left_key = [0u8; 32];
         let mut right_key = [0u8; 32];
-        right_key[0] = 0b0000_0001; // diverges at depth 0 in LSB-first order
+        right_key[0] = 0b1000_0000; // diverges at depth 0 in MSB-first order
 
         let left_value = [0x11u8; 32];
         let right_value = [0x22u8; 32];
@@ -168,7 +168,7 @@ mod tests {
         let old_root = old_3o_node_hash(0, &left_leaf, &right_leaf);
 
         let mut encoded = [0u8; BITMAP_SIZE + HASH_SIZE];
-        encoded[0] = 0b0000_0001; // sibling at depth 0
+        encoded[0] = 0b1000_0000; // sibling at depth 0
         encoded[BITMAP_SIZE..].copy_from_slice(right_leaf.data());
         let proof = InclusionCertificate::decode(&encoded).unwrap();
 
@@ -180,10 +180,10 @@ mod tests {
     fn deep_split_region_is_derived_from_key_prefix() {
         let mut left_key = [0u8; 32];
         left_key[0] = 0b1010_1101;
-        left_key[1] = 0b0000_0011;
+        left_key[1] = 0b1100_0011;
 
         let mut right_key = left_key;
-        right_key[1] ^= 0b0000_0100; // diverges at depth 10
+        right_key[1] ^= 0b0010_0000; // diverges at depth 10
 
         let left_value = [0x33u8; 32];
         let right_value = [0x44u8; 32];
@@ -194,7 +194,7 @@ mod tests {
         let old_root = old_3o_node_hash(10, &left_leaf, &right_leaf);
 
         let mut encoded = [0u8; BITMAP_SIZE + HASH_SIZE];
-        encoded[1] = 0b0000_0100; // sibling at depth 10
+        encoded[1] = 0b0010_0000; // sibling at depth 10
         encoded[BITMAP_SIZE..].copy_from_slice(right_leaf.data());
         let proof = InclusionCertificate::decode(&encoded).unwrap();
 
