@@ -1,12 +1,13 @@
 //! End-to-end cross-SDK verification test.
 //!
 //! `tests/vectors/transition_flow.json` is produced by the reference
-//! TypeScript SDK (see `state-transition-sdk-js/generate-fixtures.mjs`): a token
-//! minted to Alice and transferred Alice -> Bob -> Carol through an in-memory
-//! aggregator. Until the JS fixture generator is rolled to RSMT v6a, the
-//! multi-leaf Bob/Carol paths are intentionally pre-rollover negative fixtures.
-//! This test still confirms the Rust SDK decodes those exact bytes and
-//! round-trips them byte-for-byte.
+//! TypeScript SDK (`tests/functional/TestAggregatorClient.ts` +
+//! `tests/utils/TokenUtils.ts`): a token minted to Alice and transferred
+//! Alice -> Bob -> Carol through an in-memory aggregator, with the JS SDK
+//! asserting `verify == OK` after every step before export. This test
+//! confirms the Rust SDK decodes those exact bytes, round-trips them
+//! byte-for-byte, and reaches the same verification decisions (RSMT v6a,
+//! big-endian bit order).
 
 use unicity_token::api::bft::root_trust_base::RootTrustBaseNodeInfo;
 use unicity_token::api::bft::RootTrustBase;
@@ -64,27 +65,13 @@ fn decodes_and_roundtrips_byte_for_byte() {
 }
 
 #[test]
-fn single_leaf_fixture_verifies_against_trust_base() {
+fn verifies_against_trust_base() {
     let tb = trust_base();
-    let (_, token) = token("aliceToken");
-    token
-        .verify(&tb)
-        .unwrap_or_else(|e| panic!("aliceToken should verify: {e}"));
-}
-
-#[test]
-fn pre_v6a_multileaf_fixtures_are_rejected() {
-    let tb = trust_base();
-    for name in ["bobToken", "carolToken"] {
+    for name in ["aliceToken", "bobToken", "carolToken"] {
         let (_, token) = token(name);
-        assert!(
-            matches!(
-                token.verify(&tb),
-                Err(VerificationError::Transfer { source, .. })
-                    if matches!(*source, VerificationError::PathInvalid)
-            ),
-            "{name} should be rejected as a pre-v6a multi-leaf fixture"
-        );
+        token
+            .verify(&tb)
+            .unwrap_or_else(|e| panic!("{name} should verify: {e}"));
     }
 }
 
