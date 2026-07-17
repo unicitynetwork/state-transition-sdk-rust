@@ -1,7 +1,7 @@
 //! Radix Sparse Merkle Sum Tree (RSMST).
 //!
 //! An RSMST is the radix sparse Merkle tree (a leaf-anchored, path-compressed
-//! binary trie over a 256-bit key space, LSB-first) decorated with a positive
+//! binary trie over a 256-bit key space, MSB-first) decorated with a positive
 //! amount at every leaf and an accumulated sum at every internal node. It backs
 //! the per-asset split-allocation roots of the token-splitting protocol
 //! (yellowpaper Appendix "Radix Sparse Merkle Sum Trees"): one tree per asset
@@ -150,9 +150,9 @@ pub fn node_hash(
 }
 
 /// Bit `index` of a 256-bit key, using the SDK's one shared radix bit order
-/// ([`crate::radix::bit_at`]): bit `index % 8` of byte `index / 8`. The builder
-/// and the verifier go through this same helper, so they share exactly one
-/// key/depth convention with the transaction inclusion certificate.
+/// ([`crate::radix::bit_at`]). The builder and the verifier go through this
+/// same helper, so they share exactly one key/depth convention with the
+/// transaction inclusion certificate.
 fn key_bit(key: &[u8; 32], index: u8) -> bool {
     crate::radix::bit_at(key, index as usize)
 }
@@ -163,11 +163,11 @@ mod tests {
 
     #[test]
     fn key_bit_matches_shared_radix_convention() {
-        // Bit i = bit (i%8) of byte (i/8), byte 0 first (the shared RSMT order).
+        // Bit i is the (i % 8)-th most-significant bit of byte i / 8.
         let mut key = [0u8; 32];
-        key[0] = 0b0000_0101; // bits 0 and 2 set
-        key[1] = 0b0000_0010; // bit 9 set
-        key[31] = 0b1000_0000; // bit 255 set
+        key[0] = 0b1010_0000; // bits 0 and 2 set
+        key[1] = 0b0100_0000; // bit 9 set
+        key[31] = 0b0000_0001; // bit 255 set
         assert!(key_bit(&key, 0));
         assert!(!key_bit(&key, 1));
         assert!(key_bit(&key, 2));

@@ -214,9 +214,8 @@ impl MintJustificationVerifier for SplitMintJustificationVerifier {
         }
         let manifest = SplitManifest::from_cbor_bytes(manifest_bytes, limits)
             .map_err(|_| VerificationError::SplitManifestMalformed)?;
-        let expected_burn = EncodedPredicate::from_predicate(&BurnPredicate::new(
-            manifest.reason_hash().to_vec(),
-        ));
+        let expected_burn =
+            EncodedPredicate::from_predicate(&BurnPredicate::new(manifest.reason_hash().to_vec()));
         if burn_transfer.recipient() != &expected_burn {
             return Err(VerificationError::SplitBurnPredicateMismatch);
         }

@@ -2,7 +2,7 @@
 //! `(stateId -> transactionHash)` leaf is committed under a block's state root.
 //!
 //! Wire form (not CBOR-tagged): a 32-byte bitmap followed by the sibling hashes
-//! (32 bytes each). The bitmap's set bits — one per tree depth, LSB-first —
+//! (32 bytes each). The bitmap's set bits — one per tree depth, MSB-first —
 //! select which depths contribute a sibling; their count must equal the number
 //! of sibling hashes.
 
@@ -14,9 +14,8 @@ use crate::error::Error;
 
 const BITMAP_SIZE: usize = 32;
 const HASH_SIZE: usize = 32;
-const MAX_DEPTH: usize = 255;
 
-use crate::radix::bit_at;
+use crate::radix::{bit_at, prefix_region, MAX_DEPTH};
 
 /// A sparse-Merkle-tree inclusion path.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,10 +93,12 @@ impl InclusionCertificate {
             }
             position -= 1;
             let sibling = &self.siblings[position];
+            let region = prefix_region(key, depth);
 
             let h = DataHasher::new(HashAlgorithm::Sha256)
                 .expect("sha256")
-                .update(&[0x01, depth as u8]);
+                .update(&[0x01, depth as u8])
+                .update(&region);
             hash = if bit_at(key, depth) {
                 h.update(sibling).update(hash.data())
             } else {
@@ -107,5 +108,97 @@ impl InclusionCertificate {
         }
 
         position == 0 && &hash == expected_root
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cbor::{encode_byte_string, Decoder};
+
+    fn data_hash(bytes: [u8; 32]) -> DataHash {
+        DataHash::new(HashAlgorithm::Sha256, bytes).unwrap()
+    }
+
+    fn state_id(bytes: [u8; 32]) -> StateId {
+        StateId::from_cbor(Decoder::new(&encode_byte_string(&bytes))).unwrap()
+    }
+
+    fn leaf_hash(key: &[u8; 32], value: &[u8; 32]) -> DataHash {
+        DataHasher::new(HashAlgorithm::Sha256)
+            .expect("sha256")
+            .update(&[0x00])
+            .update(key)
+            .update(value)
+            .finalize()
+    }
+
+    fn old_3o_node_hash(depth: usize, left: &DataHash, right: &DataHash) -> DataHash {
+        DataHasher::new(HashAlgorithm::Sha256)
+            .expect("sha256")
+            .update(&[0x01, depth as u8])
+            .update(left.data())
+            .update(right.data())
+            .finalize()
+    }
+
+    fn v6a_node_hash(key: &[u8; 32], depth: usize, left: &DataHash, right: &DataHash) -> DataHash {
+        let region = prefix_region(key, depth);
+        DataHasher::new(HashAlgorithm::Sha256)
+            .expect("sha256")
+            .update(&[0x01, depth as u8])
+            .update(&region)
+            .update(left.data())
+            .update(right.data())
+            .finalize()
+    }
+
+    #[test]
+    fn two_leaf_inclusion_uses_v6a_region_commitment() {
+        let left_key = [0u8; 32];
+        let mut right_key = [0u8; 32];
+        right_key[0] = 0b1000_0000; // diverges at depth 0 in MSB-first order
+
+        let left_value = [0x11u8; 32];
+        let right_value = [0x22u8; 32];
+        let left_leaf = leaf_hash(&left_key, &left_value);
+        let right_leaf = leaf_hash(&right_key, &right_value);
+
+        let root = v6a_node_hash(&left_key, 0, &left_leaf, &right_leaf);
+        let old_root = old_3o_node_hash(0, &left_leaf, &right_leaf);
+
+        let mut encoded = [0u8; BITMAP_SIZE + HASH_SIZE];
+        encoded[0] = 0b1000_0000; // sibling at depth 0
+        encoded[BITMAP_SIZE..].copy_from_slice(right_leaf.data());
+        let proof = InclusionCertificate::decode(&encoded).unwrap();
+
+        assert!(proof.verify(&state_id(left_key), &data_hash(left_value), &root));
+        assert!(!proof.verify(&state_id(left_key), &data_hash(left_value), &old_root));
+    }
+
+    #[test]
+    fn deep_split_region_is_derived_from_key_prefix() {
+        let mut left_key = [0u8; 32];
+        left_key[0] = 0b1010_1101;
+        left_key[1] = 0b1100_0011;
+
+        let mut right_key = left_key;
+        right_key[1] ^= 0b0010_0000; // diverges at depth 10
+
+        let left_value = [0x33u8; 32];
+        let right_value = [0x44u8; 32];
+        let left_leaf = leaf_hash(&left_key, &left_value);
+        let right_leaf = leaf_hash(&right_key, &right_value);
+
+        let root = v6a_node_hash(&left_key, 10, &left_leaf, &right_leaf);
+        let old_root = old_3o_node_hash(10, &left_leaf, &right_leaf);
+
+        let mut encoded = [0u8; BITMAP_SIZE + HASH_SIZE];
+        encoded[1] = 0b0010_0000; // sibling at depth 10
+        encoded[BITMAP_SIZE..].copy_from_slice(right_leaf.data());
+        let proof = InclusionCertificate::decode(&encoded).unwrap();
+
+        assert!(proof.verify(&state_id(left_key), &data_hash(left_value), &root));
+        assert!(!proof.verify(&state_id(left_key), &data_hash(left_value), &old_root));
     }
 }

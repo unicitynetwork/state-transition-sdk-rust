@@ -134,13 +134,6 @@ cargo run --example split    --features http   # mint a coin, split it, verify o
 
 A self-contained demo application is provided under [`e2e/`](./e2e).
 
-## Regenerating cross-SDK fixtures
-
-```sh
-cd ../state-transition-sdk-js && npm install && npm run build
-node generate-fixtures.mjs > tests/vectors/transition_flow.json
-```
-
 ## License
 
 MIT OR Apache-2.0.

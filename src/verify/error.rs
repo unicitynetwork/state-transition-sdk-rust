@@ -149,10 +149,16 @@ impl fmt::Display for VerificationError {
                 write!(f, "split asset is absent from burned source token")
             }
             VerificationError::SplitSourceAmountMismatch => {
-                write!(f, "reconstructed root sum does not match burned source amount")
+                write!(
+                    f,
+                    "reconstructed root sum does not match burned source amount"
+                )
             }
             VerificationError::SplitBurnPredicateMismatch => {
-                write!(f, "burned token not locked to split manifest burn predicate")
+                write!(
+                    f,
+                    "burned token not locked to split manifest burn predicate"
+                )
             }
             VerificationError::InclusionCertificateMissing => {
                 write!(f, "inclusion certificate missing")

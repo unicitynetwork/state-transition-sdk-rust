@@ -192,17 +192,18 @@ impl BuiltRsmst {
                     });
                 }
                 Node::Branch {
-                    depth,
-                    left,
-                    right,
-                    ..
+                    depth, left, right, ..
                 } => {
                     let (sibling, next): (&Node, &Node) = if key_bit(key, *depth) {
                         (left, right)
                     } else {
                         (right, left)
                     };
-                    steps.push(RsmstProofStep::new(*depth, *sibling.hash(), sibling.sum().clone()));
+                    steps.push(RsmstProofStep::new(
+                        *depth,
+                        *sibling.hash(),
+                        sibling.sum().clone(),
+                    ));
                     node = next;
                 }
             }
@@ -230,7 +231,10 @@ mod tests {
         tree.insert(k, d, BigUint::from(42u32)).unwrap();
         let built = tree.build().unwrap();
         assert_eq!(*built.root_sum(), BigUint::from(42u32));
-        assert_eq!(built.root_hash(), leaf_hash(&k, &d, &BigUint::from(42u32)).unwrap());
+        assert_eq!(
+            built.root_hash(),
+            leaf_hash(&k, &d, &BigUint::from(42u32)).unwrap()
+        );
         let proof = built.proof(&k).unwrap();
         assert!(proof.steps().is_empty());
         assert_eq!(
@@ -278,7 +282,9 @@ mod tests {
         let k = key(&[(31, 1)]);
         tree.insert(k, [0; 32], BigUint::from(1u32)).unwrap();
         assert!(tree.insert(k, [1; 32], BigUint::from(2u32)).is_err());
-        assert!(tree.insert(key(&[(31, 2)]), [0; 32], BigUint::ZERO).is_err());
+        assert!(tree
+            .insert(key(&[(31, 2)]), [0; 32], BigUint::ZERO)
+            .is_err());
     }
 
     /// Golden cross-implementation vector. The digests below were computed
@@ -286,9 +292,9 @@ mod tests {
     /// (`SHA-256(0x10 || k || d || u256(v))` for leaves,
     /// `SHA-256(0x11 || depth || hL || u256(vL) || hR || u256(vR))` for nodes)
     /// using the SDK's shared bit order ([`crate::radix::bit_at`]). The keys
-    /// `0x00..01` (byte 31 = 1) and `0x00..00` first differ at bit 248 (the low
-    /// bit of byte 31), so the root bifurcates at depth 248 with the all-zero key
-    /// (bit 248 = 0) on the left.
+    /// `0x00..01` (byte 31 = 1) and `0x00..00` first differ at bit 255 (the low
+    /// bit of byte 31), so the root bifurcates at depth 255 with the all-zero key
+    /// (bit 255 = 0) on the left.
     #[test]
     fn golden_two_leaf_root() {
         use hex_literal::hex;
@@ -312,14 +318,14 @@ mod tests {
         let built = tree.build().unwrap();
         assert_eq!(
             built.root_hash(),
-            hex!("8edbd116cc67ca16dfd3b7852a11bdbc7048d446c5ce7f112d6476c28c6b5a96")
+            hex!("42e8d38b002c192bb7a6f121692f55b46626f68b6e9ca59b7f638aecfb4632b1")
         );
         assert_eq!(*built.root_sum(), BigUint::from(30u32));
 
-        // The single-step proof for key_a folds in sibling key_b at depth 248.
+        // The single-step proof for key_a folds in sibling key_b at depth 255.
         let proof = built.proof(&key_a).unwrap();
         assert_eq!(proof.steps().len(), 1);
-        assert_eq!(proof.steps()[0].depth(), 248);
+        assert_eq!(proof.steps()[0].depth(), 255);
         assert_eq!(
             proof.verify(&key_a, &data_a, &BigUint::from(10u32), &built.root_hash()),
             Some(BigUint::from(30u32))

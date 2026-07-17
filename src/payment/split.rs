@@ -270,9 +270,9 @@ impl TokenSplit {
                     .iter()
                     .find(|(id, _)| id == asset.id())
                     .expect("a tree is built for every source asset");
-                let proof = built
-                    .proof(token_id.bytes())
-                    .ok_or(Error::UnexpectedValue("missing allocation proof for output"))?;
+                let proof = built.proof(token_id.bytes()).ok_or(Error::UnexpectedValue(
+                    "missing allocation proof for output",
+                ))?;
                 proofs.push(proof);
             }
             tokens.push(SplitToken {

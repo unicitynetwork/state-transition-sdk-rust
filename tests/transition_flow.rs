@@ -1,11 +1,13 @@
 //! End-to-end cross-SDK verification test.
 //!
 //! `tests/vectors/transition_flow.json` is produced by the reference
-//! TypeScript SDK (see `state-transition-sdk-js/generate-fixtures.mjs`): a token
-//! minted to Alice and transferred Alice -> Bob -> Carol through an in-memory
-//! aggregator, with the JS SDK asserting `verify == OK` before export. This test
+//! TypeScript SDK (`tests/functional/TestAggregatorClient.ts` +
+//! `tests/utils/TokenUtils.ts`): a token minted to Alice and transferred
+//! Alice -> Bob -> Carol through an in-memory aggregator, with the JS SDK
+//! asserting `verify == OK` after every step before export. This test
 //! confirms the Rust SDK decodes those exact bytes, round-trips them
-//! byte-for-byte, and reaches the same verification decisions.
+//! byte-for-byte, and reaches the same verification decisions (RSMT v6a,
+//! big-endian bit order).
 
 use unicity_token::api::bft::root_trust_base::RootTrustBaseNodeInfo;
 use unicity_token::api::bft::RootTrustBase;

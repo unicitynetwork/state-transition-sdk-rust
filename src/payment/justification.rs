@@ -92,8 +92,11 @@ impl SplitMintJustification {
 
     /// Encode to CBOR (tag 39044): `[token, [proofs...]]`.
     pub fn to_cbor(&self) -> Vec<u8> {
-        let proof_bytes: Vec<Vec<u8>> =
-            self.proofs.iter().map(RsmstInclusionProof::to_cbor).collect();
+        let proof_bytes: Vec<Vec<u8>> = self
+            .proofs
+            .iter()
+            .map(RsmstInclusionProof::to_cbor)
+            .collect();
         let proof_refs: Vec<&[u8]> = proof_bytes.iter().map(Vec::as_slice).collect();
         encode_tag(
             SPLIT_MINT_JUSTIFICATION_TAG,
