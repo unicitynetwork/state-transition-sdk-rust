@@ -25,6 +25,7 @@ use super::AggregatorClient;
 const MAX_RESPONSE_BODY_BYTES: usize = 8 * 1024 * 1024;
 const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
 const MAX_PROOF_HEX_CHARS: usize = MAX_RESPONSE_BODY_BYTES - 1024;
+const RPC_INCLUSION_PENDING: i64 = -32003;
 
 /// Errors from the HTTP aggregator client.
 #[derive(Debug)]
@@ -58,6 +59,8 @@ pub enum HttpError {
     Rejected(String),
     /// Polling for the inclusion proof exceeded the configured attempts.
     Timeout,
+    /// The aggregator has no certified or pending record for this state id.
+    StateNotFound,
 }
 
 impl fmt::Display for HttpError {
@@ -75,6 +78,7 @@ impl fmt::Display for HttpError {
             }
             HttpError::Rejected(s) => write!(f, "certification rejected: {s:?}"),
             HttpError::Timeout => write!(f, "timed out waiting for inclusion proof"),
+            HttpError::StateNotFound => write!(f, "state is not known to the aggregator"),
         }
     }
 }
@@ -346,7 +350,19 @@ impl AggregatorClient for HttpAggregatorClient {
         let params = serde_json::json!({ "stateId": hex::encode(state_id.bytes()) });
 
         for attempt in 0..self.poll_attempts {
-            let result = self.rpc("get_inclusion_proof.v2", params.clone(), &[])?;
+            let result = match self.rpc("get_inclusion_proof.v2", params.clone(), &[]) {
+                Ok(result) => result,
+                Err(HttpError::Rpc { code, .. }) if code == RPC_INCLUSION_PENDING => {
+                    if attempt + 1 < self.poll_attempts {
+                        std::thread::sleep(self.poll_interval);
+                    }
+                    continue;
+                }
+                Err(HttpError::Http { status: 404, .. }) => {
+                    return Err(HttpError::StateNotFound);
+                }
+                Err(error) => return Err(error),
+            };
             let encoded = result
                 .as_str()
                 .ok_or_else(|| HttpError::Decode("expected hex string".to_string()))?;
@@ -358,14 +374,12 @@ impl AggregatorClient for HttpAggregatorClient {
             let bytes = hex::decode(encoded).map_err(|e| HttpError::Decode(e.to_string()))?;
             let proof = decode_inclusion_proof_response(&bytes)?;
 
-            // A non-inclusion proof (no certification data yet) means the state
-            // has not been certified; keep polling.
-            if proof.certification_data.is_some() && proof.inclusion_certificate.is_some() {
-                return Ok(proof);
+            if proof.certification_data.is_none() || proof.inclusion_certificate.is_none() {
+                return Err(HttpError::Decode(
+                    "inclusion proof is missing required relation data".to_string(),
+                ));
             }
-            if attempt + 1 < self.poll_attempts {
-                std::thread::sleep(self.poll_interval);
-            }
+            return Ok(proof);
         }
         Err(HttpError::Timeout)
     }

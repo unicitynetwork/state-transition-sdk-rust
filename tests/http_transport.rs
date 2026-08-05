@@ -307,27 +307,54 @@ fn get_inclusion_proof_returns_complete_proof() {
 }
 
 #[test]
-fn get_inclusion_proof_polls_then_times_out_on_non_inclusion() {
+fn get_inclusion_proof_rejects_incomplete_response_without_polling() {
     let (proof, data) = fixture_proof_and_data();
-    // A non-inclusion proof: valid unicity certificate but no certification/path.
-    let non_inclusion = InclusionProof {
+    let incomplete = InclusionProof {
         certification_data: None,
         inclusion_certificate: None,
         unicity_certificate: proof.unicity_certificate.clone(),
     };
-    let response = ok_json(&format!("\"{}\"", proof_response_hex(&non_inclusion)));
+    let response = ok_json(&format!("\"{}\"", proof_response_hex(&incomplete)));
     let server = MockServer::start(vec![response]);
 
     let state_id = StateId::derive(data.lock_script(), data.source_state_hash());
     let err = client(&server.url)
         .get_inclusion_proof(&state_id)
         .unwrap_err();
-    assert!(matches!(err, HttpError::Timeout), "unexpected: {err}");
-    assert_eq!(
-        server.request_count(),
-        3,
-        "should poll exactly poll_attempts times"
+    assert!(matches!(err, HttpError::Decode(_)), "unexpected: {err}");
+    assert_eq!(server.request_count(), 1);
+}
+
+#[test]
+fn get_inclusion_proof_fails_fast_for_unknown_state() {
+    let body = r#"{"jsonrpc":"2.0","id":"1","error":{"code":-32001,"message":"not found"}}"#;
+    let server = MockServer::start(vec![http_response("404 Not Found", body)]);
+    let (_, data) = fixture_proof_and_data();
+    let state_id = StateId::derive(data.lock_script(), data.source_state_hash());
+
+    let err = client(&server.url)
+        .get_inclusion_proof(&state_id)
+        .unwrap_err();
+    assert!(matches!(err, HttpError::StateNotFound), "unexpected: {err}");
+    assert_eq!(server.request_count(), 1);
+}
+
+#[test]
+fn get_inclusion_proof_polls_only_explicit_pending_status() {
+    let (proof, data) = fixture_proof_and_data();
+    let pending = http_response(
+        "200 OK",
+        r#"{"jsonrpc":"2.0","id":"1","error":{"code":-32003,"message":"certification is pending"}}"#,
     );
+    let complete = ok_json(&format!("\"{}\"", proof_response_hex(&proof)));
+    let server = MockServer::start(vec![pending.clone(), pending, complete]);
+    let state_id = StateId::derive(data.lock_script(), data.source_state_hash());
+
+    let got = client(&server.url)
+        .get_inclusion_proof(&state_id)
+        .expect("pending request should eventually resolve");
+    assert_eq!(got, proof);
+    assert_eq!(server.request_count(), 3);
 }
 
 #[test]
