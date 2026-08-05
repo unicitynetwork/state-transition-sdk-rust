@@ -23,6 +23,8 @@ const VERSION: u64 = 1;
 pub struct NonInclusionProof {
     certificate: NonInclusionCertificate,
     unicity_certificate: UnicityCertificate,
+    /// Local request context. This is deliberately not part of the wire format.
+    requested_state_id: Option<StateId>,
 }
 
 impl NonInclusionProof {
@@ -34,6 +36,7 @@ impl NonInclusionProof {
         Self {
             certificate,
             unicity_certificate,
+            requested_state_id: None,
         }
     }
 
@@ -52,6 +55,7 @@ impl NonInclusionProof {
         Ok(Self {
             certificate,
             unicity_certificate,
+            requested_state_id: None,
         })
     }
 
@@ -77,12 +81,57 @@ impl NonInclusionProof {
         &self.unicity_certificate
     }
 
-    /// Verify the complete proof for `target` against `trust_base`.
-    pub fn verify(
+    /// Bind this proof to the state id used to request it.
+    ///
+    /// The binding is local misuse-prevention metadata and is not serialized by
+    /// [`to_cbor`](Self::to_cbor). Verification still authenticates the bound
+    /// id cryptographically against the certificate.
+    pub fn for_state(mut self, state_id: &StateId) -> Result<Self, VerificationError> {
+        if self
+            .requested_state_id
+            .as_ref()
+            .is_some_and(|requested| requested != state_id)
+        {
+            return Err(VerificationError::NonInclusionTargetMismatch);
+        }
+        self.requested_state_id = Some(state_id.clone());
+        Ok(self)
+    }
+
+    /// The state id stamped onto this proof by the client, if any.
+    pub fn requested_state_id(&self) -> Option<&StateId> {
+        self.requested_state_id.as_ref()
+    }
+
+    /// Verify a client-bound proof against `trust_base`.
+    ///
+    /// Proofs returned by the provided clients are bound automatically. A proof
+    /// decoded directly from untrusted bytes has no request context; use
+    /// [`verify_for`](Self::verify_for) for that case.
+    pub fn verify(&self, trust_base: &RootTrustBase) -> Result<(), VerificationError> {
+        let target = self
+            .requested_state_id
+            .as_ref()
+            .ok_or(VerificationError::NonInclusionTargetMissing)?;
+        verify::verify_non_inclusion_proof(trust_base, self, target)
+    }
+
+    /// Verify a directly decoded proof for an explicit `target`.
+    ///
+    /// If the proof is already client-bound, a different target is rejected so
+    /// request context cannot be silently replaced.
+    pub fn verify_for(
         &self,
         target: &StateId,
         trust_base: &RootTrustBase,
     ) -> Result<(), VerificationError> {
+        if self
+            .requested_state_id
+            .as_ref()
+            .is_some_and(|requested| requested != target)
+        {
+            return Err(VerificationError::NonInclusionTargetMismatch);
+        }
         verify::verify_non_inclusion_proof(trust_base, self, target)
     }
 }

@@ -32,6 +32,40 @@ struct Body {
 }
 
 impl NonInclusionCertificate {
+    /// Construct the distinguished certificate for an empty tree.
+    pub fn empty_tree() -> Self {
+        Self { body: None }
+    }
+
+    /// Construct a non-empty certificate from its typed components.
+    ///
+    /// Siblings are ordered root-to-leaf and their count must equal the bitmap
+    /// population count. The fixed terminal-value width is a Unicity profile
+    /// restriction; the generic RSMT format permits arbitrary byte strings.
+    pub fn from_parts(
+        bitmap: [u8; BITMAP_SIZE],
+        siblings: Vec<[u8; HASH_SIZE]>,
+        terminal_key: [u8; TERMINAL_KEY_SIZE],
+        terminal_value: [u8; AGGREGATION_TREE_VALUE_SIZE],
+    ) -> Result<Self, Error> {
+        let expected = bitmap.iter().map(|byte| byte.count_ones()).sum::<u32>() as usize;
+        if siblings.len() != expected {
+            return Err(Error::InvalidLength {
+                what: "NonInclusionCertificate siblings",
+                expected,
+                actual: siblings.len(),
+            });
+        }
+        Ok(Self {
+            body: Some(Body {
+                bitmap,
+                siblings,
+                terminal_key,
+                terminal_value,
+            }),
+        })
+    }
+
     /// Decode the canonical raw-byte representation.
     ///
     /// The empty byte string is the distinguished certificate for an empty
@@ -40,7 +74,7 @@ impl NonInclusionCertificate {
     /// where `n` is the bitmap population count.
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
         if bytes.is_empty() {
-            return Ok(Self { body: None });
+            return Ok(Self::empty_tree());
         }
         if bytes.len() < BITMAP_SIZE {
             return Err(Error::InvalidLength {
@@ -92,14 +126,7 @@ impl NonInclusionCertificate {
             .try_into()
             .expect("length checked");
 
-        Ok(Self {
-            body: Some(Body {
-                bitmap,
-                siblings,
-                terminal_key,
-                terminal_value,
-            }),
-        })
+        Self::from_parts(bitmap, siblings, terminal_key, terminal_value)
     }
 
     /// Encode to the canonical raw-byte representation.
@@ -123,8 +150,24 @@ impl NonInclusionCertificate {
     }
 
     /// Whether this is the distinguished certificate for an empty tree.
-    pub fn is_empty(&self) -> bool {
+    pub fn is_empty_tree(&self) -> bool {
         self.body.is_none()
+    }
+
+    /// The authenticated terminal key, or `None` for an empty-tree certificate.
+    ///
+    /// Treat this as untrusted data until certificate or proof verification has
+    /// succeeded.
+    pub fn terminal_key(&self) -> Option<&[u8; TERMINAL_KEY_SIZE]> {
+        self.body.as_ref().map(|body| &body.terminal_key)
+    }
+
+    /// The authenticated terminal value, or `None` for an empty-tree certificate.
+    ///
+    /// Treat this as untrusted data until certificate or proof verification has
+    /// succeeded.
+    pub fn terminal_value(&self) -> Option<&[u8; AGGREGATION_TREE_VALUE_SIZE]> {
+        self.body.as_ref().map(|body| &body.terminal_value)
     }
 
     /// Verify both the authenticated path and the non-inclusion relation.
@@ -167,10 +210,6 @@ impl NonInclusionCertificate {
             .as_ref()
             .is_some_and(|body| &body.terminal_key == target.bytes())
     }
-
-    pub(crate) fn terminal_key(&self) -> Option<&[u8; TERMINAL_KEY_SIZE]> {
-        self.body.as_ref().map(|body| &body.terminal_key)
-    }
 }
 
 #[cfg(test)]
@@ -196,9 +235,9 @@ mod tests {
 
     #[test]
     fn empty_certificate_only_verifies_empty_root() {
-        let certificate = NonInclusionCertificate::decode(&[]).unwrap();
+        let certificate = NonInclusionCertificate::empty_tree();
         let target = state_id([7u8; 32]);
-        assert!(certificate.is_empty());
+        assert!(certificate.is_empty_tree());
         assert_eq!(certificate.verify(&target, None), Ok(()));
         assert_eq!(
             certificate.verify(&target, Some(&leaf_root(&[1; 32], &[2; 32]))),
@@ -211,10 +250,16 @@ mod tests {
     fn singleton_terminal_proves_another_key_absent() {
         let terminal_key = [1u8; 32];
         let terminal_value = [2u8; 32];
+        let certificate = NonInclusionCertificate::from_parts(
+            [0u8; BITMAP_SIZE],
+            vec![],
+            terminal_key,
+            terminal_value,
+        )
+        .unwrap();
         let mut encoded = vec![0u8; BITMAP_SIZE];
         encoded.extend_from_slice(&terminal_key);
         encoded.extend_from_slice(&terminal_value);
-        let certificate = NonInclusionCertificate::decode(&encoded).unwrap();
         let root = leaf_root(&terminal_key, &terminal_value);
 
         assert_eq!(
@@ -225,6 +270,8 @@ mod tests {
             certificate.verify(&state_id(terminal_key), Some(&root)),
             Err(VerificationError::StateIncluded)
         );
+        assert_eq!(certificate.terminal_key(), Some(&terminal_key));
+        assert_eq!(certificate.terminal_value(), Some(&terminal_value));
         assert_eq!(certificate.encode(), encoded);
     }
 
@@ -245,12 +292,15 @@ mod tests {
             .update(right_hash.data())
             .finalize();
 
-        let mut encoded = vec![0u8; BITMAP_SIZE];
-        encoded[0] = 0x80;
-        encoded.extend_from_slice(right_hash.data());
-        encoded.extend_from_slice(&left_key);
-        encoded.extend_from_slice(&left_value);
-        let certificate = NonInclusionCertificate::decode(&encoded).unwrap();
+        let mut bitmap = [0u8; BITMAP_SIZE];
+        bitmap[0] = 0x80;
+        let certificate = NonInclusionCertificate::from_parts(
+            bitmap,
+            vec![right_hash.data().try_into().expect("SHA-256 length")],
+            left_key,
+            left_value,
+        )
+        .unwrap();
 
         let mut target_left = [0u8; 32];
         target_left[31] = 1;
@@ -270,6 +320,16 @@ mod tests {
 
     #[test]
     fn decoder_rejects_wrong_terminal_or_sibling_lengths() {
+        let mut bitmap = [0u8; BITMAP_SIZE];
+        bitmap[0] = 0x80;
+        assert!(NonInclusionCertificate::from_parts(
+            bitmap,
+            vec![],
+            [1u8; 32],
+            [2u8; AGGREGATION_TREE_VALUE_SIZE],
+        )
+        .is_err());
+
         assert!(NonInclusionCertificate::decode(&[0u8; 32]).is_err());
 
         let mut one_sibling_without_terminal = vec![0u8; 64];

@@ -17,7 +17,10 @@ use unicity_token::api::{
     CertificationData, InclusionProof, NonInclusionCertificate, NonInclusionProof, StateId,
 };
 use unicity_token::cbor::{encode_array, encode_uint};
-use unicity_token::client::{AggregatorClient, HttpAggregatorClient, HttpError};
+use unicity_token::client::{
+    AggregatorClient, HttpAggregatorClient, HttpError, MembershipStatus,
+    NonInclusionAggregatorClient,
+};
 use unicity_token::transaction::Token;
 
 const FIXTURE: &str = include_str!("vectors/transition_flow.json");
@@ -56,11 +59,8 @@ fn proof_response_hex(proof: &InclusionProof) -> String {
 
 fn fixture_non_inclusion_proof() -> NonInclusionProof {
     let (inclusion, _) = fixture_proof_and_data();
-    let mut certificate = vec![0u8; 32];
-    certificate.extend_from_slice(&[0xa5; 32]);
-    certificate.extend_from_slice(&[0x5a; 32]);
     NonInclusionProof::new(
-        NonInclusionCertificate::decode(&certificate).unwrap(),
+        NonInclusionCertificate::from_parts([0u8; 32], vec![], [0xa5; 32], [0x5a; 32]).unwrap(),
         inclusion.unicity_certificate,
     )
 }
@@ -390,9 +390,42 @@ fn get_non_inclusion_proof_is_a_single_dedicated_lookup() {
     let got = client(&server.url)
         .get_non_inclusion_proof(&state_id)
         .expect("proof should decode");
-    assert_eq!(got, proof);
+    assert_eq!(got.to_cbor(), proof.to_cbor());
+    assert_eq!(got.requested_state_id(), Some(&state_id));
     assert_eq!(server.request_count(), 1);
     assert!(server.last_request().contains("get_non_inclusion_proof.v1"));
+}
+
+#[test]
+fn membership_status_hides_relation_endpoint_selection() {
+    let absent_proof = fixture_non_inclusion_proof();
+    let absent = MockServer::start(vec![ok_json(&format!(
+        "\"{}\"",
+        non_inclusion_response_hex(&absent_proof)
+    ))]);
+    let (_, data) = fixture_proof_and_data();
+    let state_id = StateId::derive(data.lock_script(), data.source_state_hash());
+
+    let status = client(&absent.url).membership_status(&state_id).unwrap();
+    let MembershipStatus::Absent(proof) = status else {
+        panic!("expected absence")
+    };
+    assert_eq!(proof.requested_state_id(), Some(&state_id));
+    assert_eq!(absent.request_count(), 1);
+
+    let (included_proof, _) = fixture_proof_and_data();
+    let relation_false = http_response(
+        "200 OK",
+        r#"{"jsonrpc":"2.0","id":"1","error":{"code":-32002,"message":"state is already included"}}"#,
+    );
+    let included = MockServer::start(vec![
+        relation_false,
+        ok_json(&format!("\"{}\"", proof_response_hex(&included_proof))),
+    ]);
+
+    let status = client(&included.url).membership_status(&state_id).unwrap();
+    assert!(matches!(status, MembershipStatus::Included(_)));
+    assert_eq!(included.request_count(), 2);
 }
 
 #[test]

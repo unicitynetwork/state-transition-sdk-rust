@@ -157,7 +157,7 @@ fn verify_inclusion_proof(
     proof: &InclusionProof,
     transaction: &impl Transaction,
 ) -> Result<(), VerificationError> {
-    let inclusion_certificate = proof
+    proof
         .inclusion_certificate
         .as_ref()
         .ok_or(VerificationError::InclusionCertificateMissing)?;
@@ -178,17 +178,49 @@ fn verify_inclusion_proof(
         return Err(VerificationError::TransactionHashMismatch);
     }
 
-    // Derive the state id from the transaction's *reconstructed* lock script and
-    // source-state hash (I1/I2/I3), and check the SMT path proves it was
-    // committed with this transaction hash, under the block's state root.
+    // Derive the state id from the transaction's reconstructed state, then
+    // delegate the relation, shard, UC, and witness checks to the public
+    // state-membership verifier.
     let state_id = StateId::derive(transaction.lock_script(), transaction.source_state_hash());
+    verify_inclusion_proof_for(trust_base, proof, &state_id)
+}
+
+/// Verify that `state_id` is included at the certified root carried by `proof`.
+///
+/// This verifies the proof's certification data and witness, but does not claim
+/// that its transaction hash belongs to a caller-supplied transaction object.
+pub fn verify_inclusion_proof_for(
+    trust_base: &RootTrustBase,
+    proof: &InclusionProof,
+    state_id: &StateId,
+) -> Result<(), VerificationError> {
+    trust_base
+        .validate()
+        .map_err(VerificationError::InvalidTrustBase)?;
+    let inclusion_certificate = proof
+        .inclusion_certificate
+        .as_ref()
+        .ok_or(VerificationError::InclusionCertificateMissing)?;
+    let certification_data = proof
+        .certification_data
+        .as_ref()
+        .ok_or(VerificationError::CertificationDataMissing)?;
+
+    let certified_state_id = StateId::derive(
+        certification_data.lock_script(),
+        certification_data.source_state_hash(),
+    );
+    if &certified_state_id != state_id {
+        return Err(VerificationError::CertificationDataMismatch);
+    }
+
     let expected_root = DataHash::new(
         HashAlgorithm::Sha256,
         proof.unicity_certificate.input_record.hash.clone(),
     )
     .map_err(|_| VerificationError::PathInvalid)?;
     if !inclusion_certificate.verify(
-        &state_id,
+        state_id,
         certification_data.transaction_hash(),
         &expected_root,
     ) {
@@ -206,8 +238,8 @@ fn verify_inclusion_proof(
 
     // Finally, the unlock script must satisfy the (reconstructed) lock script.
     verify_predicate(
-        transaction.lock_script(),
-        transaction.source_state_hash(),
+        certification_data.lock_script(),
+        certification_data.source_state_hash(),
         certification_data.transaction_hash(),
         certification_data.unlock_script(),
     )?;
@@ -421,11 +453,14 @@ mod tests {
     ) -> NonInclusionProof {
         let terminal = state_id(terminal_key);
         let value = DataHash::new(HashAlgorithm::Sha256, terminal_value.to_vec()).unwrap();
-        let mut certificate = alloc::vec![0u8; 32];
-        certificate.extend_from_slice(&terminal_key);
-        certificate.extend_from_slice(&terminal_value);
         NonInclusionProof::new(
-            NonInclusionCertificate::decode(&certificate).unwrap(),
+            NonInclusionCertificate::from_parts(
+                [0u8; 32],
+                alloc::vec![],
+                terminal_key,
+                terminal_value,
+            )
+            .unwrap(),
             signed_uc(node, leaf_root(&terminal, &value)),
         )
     }
@@ -543,6 +578,12 @@ mod tests {
     fn baseline_transfer_proof_verifies() {
         let (tb, _node, _owner, transfer, proof) = transfer_case();
         assert_eq!(verify_inclusion_proof(&tb, &proof, &transfer), Ok(()));
+        let target = StateId::derive(transfer.lock_script(), transfer.source_state_hash());
+        assert_eq!(proof.verify_for(&target, &tb), Ok(()));
+        assert_eq!(
+            proof.verify_for(&state_id([0xff; 32]), &tb),
+            Err(VerificationError::CertificationDataMismatch)
+        );
     }
 
     // --- non-inclusion proof rules ----------------------------------------
@@ -551,10 +592,33 @@ mod tests {
     fn baseline_non_inclusion_proof_verifies() {
         let node = signer(0x11);
         let proof = singleton_non_inclusion_proof(&node, [0x22; 32], [0x33; 32]);
+        let target = state_id([0x44; 32]);
+        let trust_base = trust_base(&node);
         assert_eq!(
-            verify_non_inclusion_proof(&trust_base(&node), &proof, &state_id([0x44; 32])),
+            verify_non_inclusion_proof(&trust_base, &proof, &target),
             Ok(())
         );
+        assert_eq!(
+            proof.verify(&trust_base),
+            Err(VerificationError::NonInclusionTargetMissing)
+        );
+
+        let bound = proof.for_state(&target).unwrap();
+        assert_eq!(bound.requested_state_id(), Some(&target));
+        assert_eq!(bound.verify(&trust_base), Ok(()));
+        assert_eq!(bound.verify_for(&target, &trust_base), Ok(()));
+        assert_eq!(
+            bound.verify_for(&state_id([0x45; 32]), &trust_base),
+            Err(VerificationError::NonInclusionTargetMismatch)
+        );
+        assert_eq!(
+            bound.clone().for_state(&state_id([0x45; 32])),
+            Err(VerificationError::NonInclusionTargetMismatch)
+        );
+
+        let decoded = NonInclusionProof::from_cbor(crate::cbor::Decoder::new(&bound.to_cbor()))
+            .expect("wire roundtrip");
+        assert_eq!(decoded.requested_state_id(), None);
     }
 
     #[test]

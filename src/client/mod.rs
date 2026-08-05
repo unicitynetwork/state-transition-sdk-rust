@@ -31,8 +31,7 @@ use crate::Error;
 
 /// A synchronous aggregator transport.
 ///
-/// Implementations submit certification requests and fetch relation-specific
-/// inclusion and non-inclusion proofs.
+/// Implementations submit certification requests and fetch inclusion proofs.
 /// They need not perform any verification — the [`mint`]/[`transfer`] helpers
 /// verify the resulting token against the trust base.
 pub trait AggregatorClient {
@@ -44,11 +43,31 @@ pub trait AggregatorClient {
 
     /// Fetch the inclusion proof for a state id.
     fn get_inclusion_proof(&self, state_id: &StateId) -> Result<InclusionProof, Self::Error>;
+}
 
+/// Optional aggregator capability for relation-specific non-inclusion proofs.
+///
+/// Keeping this separate from [`AggregatorClient`] makes the new API additive:
+/// existing transports and test doubles do not need a meaningless unsupported
+/// method. Implementations should bind successful results with
+/// [`NonInclusionProof::for_state`] so callers can use its one-argument
+/// verification method safely.
+pub trait NonInclusionAggregatorClient: AggregatorClient {
     /// Fetch a snapshot proof that a state id is absent from the latest
     /// certified root known to the aggregator.
     fn get_non_inclusion_proof(&self, state_id: &StateId)
         -> Result<NonInclusionProof, Self::Error>;
+}
+
+/// Proof-carrying relation returned by a membership-status lookup.
+///
+/// Callers must still verify the contained proof against their trust base.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MembershipStatus {
+    /// The requested state is claimed present at the root carried by this proof.
+    Included(InclusionProof),
+    /// The requested state is claimed absent at the root carried by this bound proof.
+    Absent(NonInclusionProof),
 }
 
 /// Errors from a construction flow.
@@ -211,13 +230,6 @@ mod tests {
         }
 
         fn get_inclusion_proof(&self, _state_id: &StateId) -> Result<InclusionProof, Self::Error> {
-            Err("no proof in mock")
-        }
-
-        fn get_non_inclusion_proof(
-            &self,
-            _state_id: &StateId,
-        ) -> Result<NonInclusionProof, Self::Error> {
             Err("no proof in mock")
         }
     }

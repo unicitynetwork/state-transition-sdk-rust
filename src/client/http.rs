@@ -21,7 +21,7 @@ use crate::api::inclusion_proof::InclusionProof;
 use crate::api::{CertificationData, NonInclusionProof, StateId};
 use crate::cbor::Decoder;
 
-use super::AggregatorClient;
+use super::{AggregatorClient, MembershipStatus, NonInclusionAggregatorClient};
 
 const MAX_RESPONSE_BODY_BYTES: usize = 8 * 1024 * 1024;
 const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
@@ -187,6 +187,22 @@ impl HttpAggregatorClient {
         self.poll_interval = interval;
         self.poll_attempts = attempts;
         self
+    }
+
+    /// Determine whether `state_id` is included or absent at a certified root.
+    ///
+    /// This hides the endpoint-selection round trip: absence normally takes one
+    /// RPC, while an included state triggers an inclusion-proof lookup after the
+    /// non-inclusion endpoint reports that the relation is false. The two RPCs
+    /// are not an atomic read if the certified root advances between them; each
+    /// returned proof authenticates the root it carries.
+    pub fn membership_status(&self, state_id: &StateId) -> Result<MembershipStatus, HttpError> {
+        match NonInclusionAggregatorClient::get_non_inclusion_proof(self, state_id) {
+            Ok(proof) => Ok(MembershipStatus::Absent(proof)),
+            Err(HttpError::StateIncluded) => AggregatorClient::get_inclusion_proof(self, state_id)
+                .map(MembershipStatus::Included),
+            Err(error) => Err(error),
+        }
     }
 
     fn validate_endpoint(&self) -> Result<url::Url, HttpError> {
@@ -411,7 +427,9 @@ impl AggregatorClient for HttpAggregatorClient {
         }
         Err(HttpError::Timeout)
     }
+}
 
+impl NonInclusionAggregatorClient for HttpAggregatorClient {
     fn get_non_inclusion_proof(&self, state_id: &StateId) -> Result<NonInclusionProof, HttpError> {
         let params = serde_json::json!({ "stateId": hex::encode(state_id.bytes()) });
         let result = match self.rpc("get_non_inclusion_proof.v1", params, &[]) {
@@ -433,7 +451,9 @@ impl AggregatorClient for HttpAggregatorClient {
             });
         }
         let bytes = hex::decode(encoded).map_err(|e| HttpError::Decode(e.to_string()))?;
-        decode_non_inclusion_proof_response(&bytes)
+        decode_non_inclusion_proof_response(&bytes)?
+            .for_state(state_id)
+            .map_err(|error| HttpError::Decode(error.to_string()))
     }
 }
 

@@ -67,10 +67,10 @@ Non-inclusion has a relation-specific API; applications never need to know
 that its Merkle path has internal machinery in common with inclusion:
 
 ```rust
-use unicity_token::client::AggregatorClient;
+use unicity_token::client::NonInclusionAggregatorClient;
 
 let proof = aggregator.get_non_inclusion_proof(&state_id)?;
-proof.verify(&state_id, &trust_base)?;
+proof.verify(&trust_base)?; // verifies the StateId bound by the client
 ```
 
 Verification authenticates the terminal leaf and every branch choice against
@@ -80,6 +80,18 @@ root; a caller that needs “still absent now” must separately enforce an
 acceptable certified round or timestamp. The HTTP client distinguishes an
 already-included state (`HttpError::StateIncluded`) from the absence of any
 certified root (`HttpError::CertifiedStateUnavailable`).
+
+If the caller does not know which relation holds, the HTTP client hides the
+endpoint selection:
+
+```rust
+use unicity_token::client::MembershipStatus;
+
+match aggregator.membership_status(&state_id)? {
+    MembershipStatus::Included(proof) => proof.verify_for(&state_id, &trust_base)?,
+    MembershipStatus::Absent(proof) => proof.verify(&trust_base)?,
+}
+```
 
 ## Payment tokens & splits
 

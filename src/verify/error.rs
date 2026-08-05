@@ -70,6 +70,10 @@ pub enum VerificationError {
     PathInvalid,
     /// The non-inclusion certificate did not authenticate against the certified root.
     NonInclusionCertificateInvalid,
+    /// A directly decoded non-inclusion proof has no requested state id attached.
+    NonInclusionTargetMissing,
+    /// An explicit target differs from the state id attached by the client.
+    NonInclusionTargetMismatch,
     /// The requested state was present at the certified root.
     StateIncluded,
     /// The certified shard does not contain the state id.
@@ -175,6 +179,18 @@ impl fmt::Display for VerificationError {
             VerificationError::PathInvalid => write!(f, "inclusion path invalid"),
             VerificationError::NonInclusionCertificateInvalid => {
                 write!(f, "non-inclusion certificate invalid")
+            }
+            VerificationError::NonInclusionTargetMissing => {
+                write!(
+                    f,
+                    "non-inclusion proof is not bound to a requested state id"
+                )
+            }
+            VerificationError::NonInclusionTargetMismatch => {
+                write!(
+                    f,
+                    "non-inclusion proof target differs from the requested state id"
+                )
             }
             VerificationError::StateIncluded => {
                 write!(f, "state is included at the certified root")

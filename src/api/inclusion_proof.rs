@@ -3,13 +3,15 @@
 
 use alloc::vec::Vec;
 
-use super::bft::UnicityCertificate;
+use super::bft::{RootTrustBase, UnicityCertificate};
 use super::certification::CertificationData;
 use super::inclusion_certificate::InclusionCertificate;
+use super::StateId;
 use crate::cbor::{
     encode_array, encode_byte_string, encode_nullable, encode_tag, encode_uint, Decoder,
 };
 use crate::error::Error;
+use crate::verify::{self, VerificationError};
 
 /// CBOR tag for [`InclusionProof`].
 pub const INCLUSION_PROOF_TAG: u64 = 39033;
@@ -58,5 +60,18 @@ impl InclusionProof {
                 &self.unicity_certificate.to_cbor(),
             ]),
         )
+    }
+
+    /// Verify that this proof includes `state_id` at its certified root.
+    ///
+    /// This verifies the state relation, certification data, shard, quorum UC,
+    /// and unlock witness. Transaction/token verification may impose additional
+    /// application-level constraints.
+    pub fn verify_for(
+        &self,
+        state_id: &StateId,
+        trust_base: &RootTrustBase,
+    ) -> Result<(), VerificationError> {
+        verify::verify_inclusion_proof_for(trust_base, self, state_id)
     }
 }
