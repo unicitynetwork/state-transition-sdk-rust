@@ -4,7 +4,8 @@
 //! server (via `new_insecure_http`), exercising the success path and every
 //! error branch — request framing, headers, JSON-RPC error mapping, HTTP status
 //! errors, certification rejection, inclusion-proof decoding, and the polling /
-//! timeout loop — without touching live infrastructure.
+//! timeout loop, and dedicated non-inclusion lookup — without touching live
+//! infrastructure.
 #![cfg(feature = "http")]
 
 use std::io::{Read, Write};
@@ -12,7 +13,9 @@ use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use unicity_token::api::{CertificationData, InclusionProof, StateId};
+use unicity_token::api::{
+    CertificationData, InclusionProof, NonInclusionCertificate, NonInclusionProof, StateId,
+};
 use unicity_token::cbor::{encode_array, encode_uint};
 use unicity_token::client::{AggregatorClient, HttpAggregatorClient, HttpError};
 use unicity_token::transaction::Token;
@@ -46,6 +49,23 @@ fn fixture_proof_and_data() -> (InclusionProof, CertificationData) {
 /// Wrap an inclusion proof as the `[blockNumber, InclusionProof]` response body
 /// the aggregator returns, hex-encoded.
 fn proof_response_hex(proof: &InclusionProof) -> String {
+    let block = encode_uint(7);
+    let body = encode_array(&[block.as_slice(), proof.to_cbor().as_slice()]);
+    hex::encode(body)
+}
+
+fn fixture_non_inclusion_proof() -> NonInclusionProof {
+    let (inclusion, _) = fixture_proof_and_data();
+    let mut certificate = vec![0u8; 32];
+    certificate.extend_from_slice(&[0xa5; 32]);
+    certificate.extend_from_slice(&[0x5a; 32]);
+    NonInclusionProof::new(
+        NonInclusionCertificate::decode(&certificate).unwrap(),
+        inclusion.unicity_certificate,
+    )
+}
+
+fn non_inclusion_response_hex(proof: &NonInclusionProof) -> String {
     let block = encode_uint(7);
     let body = encode_array(&[block.as_slice(), proof.to_cbor().as_slice()]);
     hex::encode(body)
@@ -355,6 +375,61 @@ fn get_inclusion_proof_polls_only_explicit_pending_status() {
         .expect("pending request should eventually resolve");
     assert_eq!(got, proof);
     assert_eq!(server.request_count(), 3);
+}
+
+#[test]
+fn get_non_inclusion_proof_is_a_single_dedicated_lookup() {
+    let proof = fixture_non_inclusion_proof();
+    let server = MockServer::start(vec![ok_json(&format!(
+        "\"{}\"",
+        non_inclusion_response_hex(&proof)
+    ))]);
+    let (_, data) = fixture_proof_and_data();
+    let state_id = StateId::derive(data.lock_script(), data.source_state_hash());
+
+    let got = client(&server.url)
+        .get_non_inclusion_proof(&state_id)
+        .expect("proof should decode");
+    assert_eq!(got, proof);
+    assert_eq!(server.request_count(), 1);
+    assert!(server.last_request().contains("get_non_inclusion_proof.v1"));
+}
+
+#[test]
+fn non_inclusion_lookup_maps_false_relation_and_missing_root() {
+    let (_, data) = fixture_proof_and_data();
+    let state_id = StateId::derive(data.lock_script(), data.source_state_hash());
+
+    let included = MockServer::start(vec![http_response(
+        "200 OK",
+        r#"{"jsonrpc":"2.0","id":"1","error":{"code":-32002,"message":"state is already included"}}"#,
+    )]);
+    assert!(matches!(
+        client(&included.url).get_non_inclusion_proof(&state_id),
+        Err(HttpError::StateIncluded)
+    ));
+
+    let unavailable = MockServer::start(vec![http_response(
+        "404 Not Found",
+        r#"{"jsonrpc":"2.0","id":"1","error":{"code":-32001,"message":"not found"}}"#,
+    )]);
+    assert!(matches!(
+        client(&unavailable.url).get_non_inclusion_proof(&state_id),
+        Err(HttpError::CertifiedStateUnavailable)
+    ));
+}
+
+#[test]
+fn get_non_inclusion_proof_rejects_malformed_result() {
+    let (_, data) = fixture_proof_and_data();
+    let state_id = StateId::derive(data.lock_script(), data.source_state_hash());
+    for response in [ok_json("123"), ok_json("\"zzzz\""), ok_json("\"deadbeef\"")] {
+        let server = MockServer::start(vec![response]);
+        assert!(matches!(
+            client(&server.url).get_non_inclusion_proof(&state_id),
+            Err(HttpError::Decode(_))
+        ));
+    }
 }
 
 #[test]

@@ -57,6 +57,29 @@ let token = client::mint(&aggregator, &trust_base, trust_base.network_id,
 The SDK is generic over the `AggregatorClient` trait, so you can plug in any
 transport (or an in-memory one for tests); `HttpAggregatorClient` is the
 batteries-included blocking JSON-RPC implementation.
+Inclusion polling is limited to the server's explicit `-32003` pending status;
+an unknown StateID fails immediately as `HttpError::StateNotFound` instead of
+consuming the polling budget.
+
+## Prove that a state is absent
+
+Non-inclusion has a relation-specific API; applications never need to know
+that its Merkle path has internal machinery in common with inclusion:
+
+```rust
+use unicity_token::client::AggregatorClient;
+
+let proof = aggregator.get_non_inclusion_proof(&state_id)?;
+proof.verify(&state_id, &trust_base)?;
+```
+
+Verification authenticates the terminal leaf and every branch choice against
+the quorum-signed SMT root, then checks that the terminal key differs from the
+requested state id. A proof is a snapshot statement at its embedded certified
+root; a caller that needs “still absent now” must separately enforce an
+acceptable certified round or timestamp. The HTTP client distinguishes an
+already-included state (`HttpError::StateIncluded`) from the absence of any
+certified root (`HttpError::CertifiedStateUnavailable`).
 
 ## Payment tokens & splits
 

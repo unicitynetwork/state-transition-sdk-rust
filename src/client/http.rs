@@ -2,8 +2,9 @@
 //! gateway (`http` feature).
 //!
 //! This is the synchronous transport for production use: it speaks the same
-//! JSON-RPC protocol as the reference SDKs (methods `certification_request` and
-//! `get_inclusion_proof.v2`), authenticates with an optional `X-API-Key`, and
+//! JSON-RPC protocol as the reference SDKs (methods `certification_request`,
+//! `get_inclusion_proof.v2`, and `get_non_inclusion_proof.v1`), authenticates
+//! with an optional `X-API-Key`, and
 //! **polls** `get_inclusion_proof` until the aggregator has certified the state
 //! (so the [`mint`](super::mint)/[`transfer`](super::transfer) helpers work
 //! unchanged against live infrastructure).
@@ -17,7 +18,7 @@ use zeroize::Zeroize;
 
 use crate::api::certification_request::CertificationRequest;
 use crate::api::inclusion_proof::InclusionProof;
-use crate::api::{CertificationData, StateId};
+use crate::api::{CertificationData, NonInclusionProof, StateId};
 use crate::cbor::Decoder;
 
 use super::AggregatorClient;
@@ -25,6 +26,7 @@ use super::AggregatorClient;
 const MAX_RESPONSE_BODY_BYTES: usize = 8 * 1024 * 1024;
 const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
 const MAX_PROOF_HEX_CHARS: usize = MAX_RESPONSE_BODY_BYTES - 1024;
+const RPC_STATE_INCLUDED: i64 = -32002;
 const RPC_INCLUSION_PENDING: i64 = -32003;
 
 /// Errors from the HTTP aggregator client.
@@ -61,6 +63,10 @@ pub enum HttpError {
     Timeout,
     /// The aggregator has no certified or pending record for this state id.
     StateNotFound,
+    /// No certified state is available from which to prove absence.
+    CertifiedStateUnavailable,
+    /// The requested state is present at the certified root.
+    StateIncluded,
 }
 
 impl fmt::Display for HttpError {
@@ -79,6 +85,12 @@ impl fmt::Display for HttpError {
             HttpError::Rejected(s) => write!(f, "certification rejected: {s:?}"),
             HttpError::Timeout => write!(f, "timed out waiting for inclusion proof"),
             HttpError::StateNotFound => write!(f, "state is not known to the aggregator"),
+            HttpError::CertifiedStateUnavailable => {
+                write!(f, "no certified state is available")
+            }
+            HttpError::StateIncluded => {
+                write!(f, "state is already included at the certified root")
+            }
         }
     }
 }
@@ -319,7 +331,23 @@ fn decode_inclusion_proof_response(bytes: &[u8]) -> Result<InclusionProof, HttpE
     let items = d
         .array(Some(2))
         .map_err(|e| HttpError::Decode(e.to_string()))?;
+    items[0]
+        .uint()
+        .map_err(|e| HttpError::Decode(e.to_string()))?;
     InclusionProof::from_cbor(items[1]).map_err(|e| HttpError::Decode(e.to_string()))
+}
+
+/// Decode the `[blockNumber, NonInclusionProof]` response payload.
+fn decode_non_inclusion_proof_response(bytes: &[u8]) -> Result<NonInclusionProof, HttpError> {
+    let d = Decoder::new(bytes);
+    d.finish().map_err(|e| HttpError::Decode(e.to_string()))?;
+    let items = d
+        .array(Some(2))
+        .map_err(|e| HttpError::Decode(e.to_string()))?;
+    items[0]
+        .uint()
+        .map_err(|e| HttpError::Decode(e.to_string()))?;
+    NonInclusionProof::from_cbor(items[1]).map_err(|e| HttpError::Decode(e.to_string()))
 }
 
 impl AggregatorClient for HttpAggregatorClient {
@@ -382,6 +410,30 @@ impl AggregatorClient for HttpAggregatorClient {
             return Ok(proof);
         }
         Err(HttpError::Timeout)
+    }
+
+    fn get_non_inclusion_proof(&self, state_id: &StateId) -> Result<NonInclusionProof, HttpError> {
+        let params = serde_json::json!({ "stateId": hex::encode(state_id.bytes()) });
+        let result = match self.rpc("get_non_inclusion_proof.v1", params, &[]) {
+            Ok(result) => result,
+            Err(HttpError::Http { status: 404, .. }) => {
+                return Err(HttpError::CertifiedStateUnavailable)
+            }
+            Err(HttpError::Rpc { code, .. }) if code == RPC_STATE_INCLUDED => {
+                return Err(HttpError::StateIncluded)
+            }
+            Err(error) => return Err(error),
+        };
+        let encoded = result
+            .as_str()
+            .ok_or_else(|| HttpError::Decode("expected hex string".to_string()))?;
+        if encoded.len() > MAX_PROOF_HEX_CHARS {
+            return Err(HttpError::ResponseTooLarge {
+                limit: MAX_PROOF_HEX_CHARS,
+            });
+        }
+        let bytes = hex::decode(encoded).map_err(|e| HttpError::Decode(e.to_string()))?;
+        decode_non_inclusion_proof_response(&bytes)
     }
 }
 
@@ -493,5 +545,16 @@ mod tests {
         let mut trailing = two.clone();
         trailing.push(0xff);
         assert!(decode_inclusion_proof_response(&trailing).is_err());
+    }
+
+    #[test]
+    fn decode_non_inclusion_proof_response_rejects_malformed() {
+        use crate::cbor::{encode_array, encode_uint};
+
+        assert!(decode_non_inclusion_proof_response(&[]).is_err());
+        let one = encode_array(&[encode_uint(1).as_slice()]);
+        assert!(decode_non_inclusion_proof_response(&one).is_err());
+        let two = encode_array(&[encode_uint(1).as_slice(), encode_uint(2).as_slice()]);
+        assert!(decode_non_inclusion_proof_response(&two).is_err());
     }
 }

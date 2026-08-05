@@ -17,7 +17,7 @@ use core::fmt;
 
 use crate::api::bft::RootTrustBase;
 use crate::api::inclusion_proof::InclusionProof;
-use crate::api::{CertificationData, NetworkId, StateId};
+use crate::api::{CertificationData, NetworkId, NonInclusionProof, StateId};
 use crate::crypto::signer::Signer;
 use crate::predicate::unlock::sign_signature_unlock;
 use crate::predicate::{EncodedPredicate, Predicate};
@@ -31,7 +31,8 @@ use crate::Error;
 
 /// A synchronous aggregator transport.
 ///
-/// Implementations submit certification requests and fetch inclusion proofs.
+/// Implementations submit certification requests and fetch relation-specific
+/// inclusion and non-inclusion proofs.
 /// They need not perform any verification — the [`mint`]/[`transfer`] helpers
 /// verify the resulting token against the trust base.
 pub trait AggregatorClient {
@@ -43,6 +44,11 @@ pub trait AggregatorClient {
 
     /// Fetch the inclusion proof for a state id.
     fn get_inclusion_proof(&self, state_id: &StateId) -> Result<InclusionProof, Self::Error>;
+
+    /// Fetch a snapshot proof that a state id is absent from the latest
+    /// certified root known to the aggregator.
+    fn get_non_inclusion_proof(&self, state_id: &StateId)
+        -> Result<NonInclusionProof, Self::Error>;
 }
 
 /// Errors from a construction flow.
@@ -205,6 +211,13 @@ mod tests {
         }
 
         fn get_inclusion_proof(&self, _state_id: &StateId) -> Result<InclusionProof, Self::Error> {
+            Err("no proof in mock")
+        }
+
+        fn get_non_inclusion_proof(
+            &self,
+            _state_id: &StateId,
+        ) -> Result<NonInclusionProof, Self::Error> {
             Err("no proof in mock")
         }
     }
