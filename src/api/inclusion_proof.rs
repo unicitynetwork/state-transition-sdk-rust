@@ -15,8 +15,8 @@ use crate::error::Error;
 pub const INCLUSION_PROOF_TAG: u64 = 39033;
 const VERSION: u64 = 1;
 
-/// A proof of (non-)inclusion in the sparse Merkle tree, plus the unicity
-/// certificate that anchors the tree root to the BFT consensus.
+/// A proof of inclusion in the sparse Merkle tree, plus the unicity certificate
+/// that anchors the tree root to the BFT consensus.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InclusionProof {
     /// What was certified (present for an inclusion proof).

@@ -1,5 +1,5 @@
 //! Input record (CBOR tag 39002) — the per-block commitment whose `hash` is the
-//! SMT root an inclusion certificate proves against.
+//! certified SMT root.
 
 use alloc::vec::Vec;
 
@@ -21,7 +21,7 @@ pub struct InputRecord {
     pub epoch: u64,
     /// Previous block hash.
     pub previous_hash: Option<Vec<u8>>,
-    /// This block's state-tree root hash (the inclusion-proof root).
+    /// This block's certified state-tree root hash.
     pub hash: Vec<u8>,
     /// Summary value.
     pub summary_value: Vec<u8>,

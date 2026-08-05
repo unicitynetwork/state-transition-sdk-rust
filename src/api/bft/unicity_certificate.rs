@@ -21,7 +21,7 @@ const VERSION: u64 = 1;
 /// seal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnicityCertificate {
-    /// The per-block input record (its `hash` is the inclusion-proof root).
+    /// The per-block input record (its `hash` is the certified state-tree root).
     pub input_record: InputRecord,
     /// Optional technical record hash.
     pub technical_record_hash: Option<Vec<u8>>,

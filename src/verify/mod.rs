@@ -42,9 +42,9 @@ pub use mint_justification::{
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
-use crate::api::bft::RootTrustBase;
+use crate::api::bft::{RootTrustBase, UnicityCertificate};
 use crate::api::inclusion_proof::InclusionProof;
-use crate::api::StateId;
+use crate::api::{NonInclusionProof, StateId};
 use crate::crypto::hash::{DataHash, HashAlgorithm};
 use crate::predicate::builtin::SignaturePredicate;
 use crate::predicate::unlock::verify_signature_unlock;
@@ -202,7 +202,7 @@ fn verify_inclusion_proof(
     }
 
     // The unicity certificate must chain to a quorum-signed seal on our network.
-    verify_unicity_certificate(trust_base, proof)?;
+    verify_unicity_certificate(trust_base, &proof.unicity_certificate)?;
 
     // Finally, the unlock script must satisfy the (reconstructed) lock script.
     verify_predicate(
@@ -217,9 +217,8 @@ fn verify_inclusion_proof(
 
 fn verify_unicity_certificate(
     trust_base: &RootTrustBase,
-    proof: &InclusionProof,
+    uc: &UnicityCertificate,
 ) -> Result<(), VerificationError> {
-    let uc = &proof.unicity_certificate;
     let seal = &uc.unicity_seal;
 
     if seal.network_id != trust_base.network_id {
@@ -263,6 +262,57 @@ fn verify_unicity_certificate(
     Ok(())
 }
 
+/// Verify that `target` was absent at the certified root carried by `proof`.
+///
+/// This establishes a snapshot fact only. It does not imply that the state is
+/// absent at any later root.
+pub fn verify_non_inclusion_proof(
+    trust_base: &RootTrustBase,
+    proof: &NonInclusionProof,
+    target: &StateId,
+) -> Result<(), VerificationError> {
+    trust_base
+        .validate()
+        .map_err(VerificationError::InvalidTrustBase)?;
+
+    let uc = proof.unicity_certificate();
+    let expected_root = match uc.input_record.hash.as_slice() {
+        [] => None,
+        bytes if bytes.len() == 32 => Some(
+            DataHash::new(HashAlgorithm::Sha256, bytes.to_vec())
+                .map_err(|_| VerificationError::NonInclusionCertificateInvalid)?,
+        ),
+        _ => return Err(VerificationError::NonInclusionCertificateInvalid),
+    };
+
+    if !proof
+        .certificate()
+        .authenticates(target, expected_root.as_ref())
+    {
+        return Err(VerificationError::NonInclusionCertificateInvalid);
+    }
+
+    let shard = &uc.shard_tree_certificate.shard;
+    if shard.length() != 0 {
+        let terminal_in_shard = proof
+            .certificate()
+            .terminal_key()
+            .map_or(true, |terminal| shard.is_prefix_of(terminal));
+        if !shard.is_prefix_of(target.bytes()) || !terminal_in_shard {
+            return Err(VerificationError::ShardMismatch);
+        }
+    }
+
+    // Authenticate the root before reporting whether the terminal is the
+    // requested state. An untrusted certificate must never yield StateIncluded.
+    verify_unicity_certificate(trust_base, uc)?;
+
+    if proof.certificate().terminal_matches(target) {
+        return Err(VerificationError::StateIncluded);
+    }
+    Ok(())
+}
+
 fn verify_predicate(
     lock_script: &EncodedPredicate,
     source_state_hash: &DataHash,
@@ -300,7 +350,8 @@ mod tests {
         InputRecord, RootTrustBaseNodeInfo, ShardId, ShardTreeCertificate, UnicityCertificate,
         UnicitySeal, UnicityTreeCertificate,
     };
-    use crate::api::{CertificationData, InclusionCertificate, NetworkId};
+    use crate::api::{CertificationData, InclusionCertificate, NetworkId, NonInclusionCertificate};
+    use crate::cbor::{encode_byte_string, Decoder};
     use crate::crypto::hash::sha256;
     use crate::crypto::signer::{Secp256k1Signer, Signer};
     use crate::predicate::unlock::sign_signature_unlock;
@@ -357,6 +408,26 @@ mod tests {
         let mut root = [0u8; 32];
         root.copy_from_slice(sha256(&preimage).data());
         root
+    }
+
+    fn state_id(bytes: [u8; 32]) -> StateId {
+        StateId::from_cbor(Decoder::new(&encode_byte_string(&bytes))).unwrap()
+    }
+
+    fn singleton_non_inclusion_proof(
+        node: &Secp256k1Signer,
+        terminal_key: [u8; 32],
+        terminal_value: [u8; 32],
+    ) -> NonInclusionProof {
+        let terminal = state_id(terminal_key);
+        let value = DataHash::new(HashAlgorithm::Sha256, terminal_value.to_vec()).unwrap();
+        let mut certificate = alloc::vec![0u8; 32];
+        certificate.extend_from_slice(&terminal_key);
+        certificate.extend_from_slice(&terminal_value);
+        NonInclusionProof::new(
+            NonInclusionCertificate::decode(&certificate).unwrap(),
+            signed_uc(node, leaf_root(&terminal, &value)),
+        )
     }
 
     /// A unicity certificate committing to `root`, signed by `node`.
@@ -472,6 +543,78 @@ mod tests {
     fn baseline_transfer_proof_verifies() {
         let (tb, _node, _owner, transfer, proof) = transfer_case();
         assert_eq!(verify_inclusion_proof(&tb, &proof, &transfer), Ok(()));
+    }
+
+    // --- non-inclusion proof rules ----------------------------------------
+
+    #[test]
+    fn baseline_non_inclusion_proof_verifies() {
+        let node = signer(0x11);
+        let proof = singleton_non_inclusion_proof(&node, [0x22; 32], [0x33; 32]);
+        assert_eq!(
+            verify_non_inclusion_proof(&trust_base(&node), &proof, &state_id([0x44; 32])),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn non_inclusion_proof_rejects_present_target() {
+        let node = signer(0x11);
+        let terminal = [0x22; 32];
+        let proof = singleton_non_inclusion_proof(&node, terminal, [0x33; 32]);
+        assert_eq!(
+            verify_non_inclusion_proof(&trust_base(&node), &proof, &state_id(terminal)),
+            Err(VerificationError::StateIncluded)
+        );
+    }
+
+    #[test]
+    fn non_inclusion_proof_rejects_tampered_terminal() {
+        let node = signer(0x11);
+        let proof = singleton_non_inclusion_proof(&node, [0x22; 32], [0x33; 32]);
+        let mut encoded = proof.certificate().encode();
+        *encoded.last_mut().unwrap() ^= 1;
+        let tampered = NonInclusionProof::new(
+            NonInclusionCertificate::decode(&encoded).unwrap(),
+            proof.unicity_certificate().clone(),
+        );
+        assert_eq!(
+            verify_non_inclusion_proof(&trust_base(&node), &tampered, &state_id([0x44; 32])),
+            Err(VerificationError::NonInclusionCertificateInvalid)
+        );
+    }
+
+    #[test]
+    fn non_inclusion_proof_requires_a_trusted_quorum() {
+        let trusted = signer(0x11);
+        let rogue = signer(0x12);
+        let proof = singleton_non_inclusion_proof(&rogue, [0x22; 32], [0x33; 32]);
+        assert_eq!(
+            verify_non_inclusion_proof(&trust_base(&trusted), &proof, &state_id([0x44; 32])),
+            Err(VerificationError::QuorumNotMet)
+        );
+    }
+
+    #[test]
+    fn non_inclusion_terminal_must_belong_to_certified_shard() {
+        let node = signer(0x11);
+        let proof = singleton_non_inclusion_proof(&node, [0x80; 32], [0x33; 32]);
+        let mut uc = proof.unicity_certificate().clone();
+        // One-bit shard `0`: the target belongs to it, but the authenticated
+        // terminal starts with `1` and therefore cannot belong to this root.
+        uc.shard_tree_certificate.shard = ShardId::decode(&[0b0100_0000]).unwrap();
+        let seal_hash = uc.computed_seal_hash().unwrap().data().to_vec();
+        let signature = node
+            .sign(&mk_seal(seal_hash.clone(), Vec::new()).calculate_hash())
+            .encode()
+            .to_vec();
+        uc.unicity_seal = mk_seal(seal_hash, alloc::vec![("NODE".to_string(), signature)]);
+        let proof = NonInclusionProof::new(proof.certificate().clone(), uc);
+
+        assert_eq!(
+            verify_non_inclusion_proof(&trust_base(&node), &proof, &state_id([0x00; 32])),
+            Err(VerificationError::ShardMismatch)
+        );
     }
 
     // --- one test per inclusion-proof rule ---------------------------------

@@ -1,0 +1,302 @@
+//! Non-inclusion certificate for the Unicity radix sparse Merkle tree.
+//!
+//! The public type is relation-specific even though inclusion and
+//! non-inclusion use the same private path-folding primitive.  A non-empty
+//! certificate authenticates the terminal leaf reached by key-directed descent;
+//! that terminal must have a different key from the requested state id.
+
+use alloc::vec::Vec;
+
+use crate::api::{StateId, AGGREGATION_TREE_VALUE_SIZE};
+use crate::crypto::hash::DataHash;
+use crate::error::Error;
+use crate::radix::fold_certificate_path;
+use crate::verify::VerificationError;
+
+const BITMAP_SIZE: usize = 32;
+const HASH_SIZE: usize = 32;
+const TERMINAL_KEY_SIZE: usize = 32;
+
+/// An authenticated proof that one state id is absent from an SMT root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NonInclusionCertificate {
+    body: Option<Body>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Body {
+    bitmap: [u8; BITMAP_SIZE],
+    siblings: Vec<[u8; HASH_SIZE]>,
+    terminal_key: [u8; TERMINAL_KEY_SIZE],
+    terminal_value: [u8; AGGREGATION_TREE_VALUE_SIZE],
+}
+
+impl NonInclusionCertificate {
+    /// Decode the canonical raw-byte representation.
+    ///
+    /// The empty byte string is the distinguished certificate for an empty
+    /// tree.  Otherwise the format is
+    /// `bitmap[32] || siblings[n][32] || terminalKey[32] || terminalValue[32]`,
+    /// where `n` is the bitmap population count.
+    pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
+        if bytes.is_empty() {
+            return Ok(Self { body: None });
+        }
+        if bytes.len() < BITMAP_SIZE {
+            return Err(Error::InvalidLength {
+                what: "NonInclusionCertificate bitmap",
+                expected: BITMAP_SIZE,
+                actual: bytes.len(),
+            });
+        }
+
+        let mut bitmap = [0u8; BITMAP_SIZE];
+        bitmap.copy_from_slice(&bytes[..BITMAP_SIZE]);
+        let sibling_count = bitmap.iter().map(|byte| byte.count_ones()).sum::<u32>() as usize;
+        let terminal_offset = BITMAP_SIZE
+            .checked_add(sibling_count * HASH_SIZE)
+            .and_then(|size| size.checked_add(TERMINAL_KEY_SIZE))
+            .ok_or(Error::OutOfRange(
+                "NonInclusionCertificate encoded length overflow",
+            ))?;
+        if bytes.len() < terminal_offset {
+            return Err(Error::InvalidLength {
+                what: "NonInclusionCertificate",
+                expected: terminal_offset + AGGREGATION_TREE_VALUE_SIZE,
+                actual: bytes.len(),
+            });
+        }
+        let terminal_value_size = bytes.len() - terminal_offset;
+        if terminal_value_size != AGGREGATION_TREE_VALUE_SIZE {
+            return Err(Error::InvalidLength {
+                what: "Unicity aggregation-tree terminal value",
+                expected: AGGREGATION_TREE_VALUE_SIZE,
+                actual: terminal_value_size,
+            });
+        }
+        let expected = terminal_offset + AGGREGATION_TREE_VALUE_SIZE;
+
+        let siblings_end = BITMAP_SIZE + sibling_count * HASH_SIZE;
+        let mut siblings = Vec::with_capacity(sibling_count);
+        for chunk in bytes[BITMAP_SIZE..siblings_end].chunks_exact(HASH_SIZE) {
+            let mut sibling = [0u8; HASH_SIZE];
+            sibling.copy_from_slice(chunk);
+            siblings.push(sibling);
+        }
+        let terminal_key: [u8; TERMINAL_KEY_SIZE] = bytes
+            [siblings_end..siblings_end + TERMINAL_KEY_SIZE]
+            .try_into()
+            .expect("length checked");
+        let terminal_value: [u8; AGGREGATION_TREE_VALUE_SIZE] = bytes
+            [siblings_end + TERMINAL_KEY_SIZE..expected]
+            .try_into()
+            .expect("length checked");
+
+        Ok(Self {
+            body: Some(Body {
+                bitmap,
+                siblings,
+                terminal_key,
+                terminal_value,
+            }),
+        })
+    }
+
+    /// Encode to the canonical raw-byte representation.
+    pub fn encode(&self) -> Vec<u8> {
+        let Some(body) = &self.body else {
+            return Vec::new();
+        };
+        let mut bytes = Vec::with_capacity(
+            BITMAP_SIZE
+                + body.siblings.len() * HASH_SIZE
+                + TERMINAL_KEY_SIZE
+                + AGGREGATION_TREE_VALUE_SIZE,
+        );
+        bytes.extend_from_slice(&body.bitmap);
+        for sibling in &body.siblings {
+            bytes.extend_from_slice(sibling);
+        }
+        bytes.extend_from_slice(&body.terminal_key);
+        bytes.extend_from_slice(&body.terminal_value);
+        bytes
+    }
+
+    /// Whether this is the distinguished certificate for an empty tree.
+    pub fn is_empty(&self) -> bool {
+        self.body.is_none()
+    }
+
+    /// Verify both the authenticated path and the non-inclusion relation.
+    /// `expected_root` is `None` only for an empty certified tree.
+    ///
+    /// This low-level method assumes `expected_root` is already trusted. Use
+    /// [`NonInclusionProof::verify`](crate::api::NonInclusionProof::verify) when
+    /// the root still needs BFT-certificate authentication.
+    pub fn verify(
+        &self,
+        target: &StateId,
+        expected_root: Option<&DataHash>,
+    ) -> Result<(), VerificationError> {
+        if !self.authenticates(target, expected_root) {
+            return Err(VerificationError::NonInclusionCertificateInvalid);
+        }
+        if self.terminal_matches(target) {
+            return Err(VerificationError::StateIncluded);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn authenticates(&self, target: &StateId, expected_root: Option<&DataHash>) -> bool {
+        match (&self.body, expected_root) {
+            (None, None) => true,
+            (None, Some(_)) | (Some(_), None) => false,
+            (Some(body), Some(root)) => fold_certificate_path(
+                &body.bitmap,
+                &body.siblings,
+                target.bytes(),
+                &body.terminal_key,
+                &body.terminal_value,
+            )
+            .is_some_and(|calculated| &calculated == root),
+        }
+    }
+
+    pub(crate) fn terminal_matches(&self, target: &StateId) -> bool {
+        self.body
+            .as_ref()
+            .is_some_and(|body| &body.terminal_key == target.bytes())
+    }
+
+    pub(crate) fn terminal_key(&self) -> Option<&[u8; TERMINAL_KEY_SIZE]> {
+        self.body.as_ref().map(|body| &body.terminal_key)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cbor::{encode_byte_string, Decoder};
+    use crate::crypto::hash::{DataHasher, HashAlgorithm};
+    use alloc::vec;
+    use hex_literal::hex;
+
+    fn state_id(bytes: [u8; 32]) -> StateId {
+        StateId::from_cbor(Decoder::new(&encode_byte_string(&bytes))).unwrap()
+    }
+
+    fn leaf_root(key: &[u8; 32], value: &[u8; 32]) -> DataHash {
+        DataHasher::new(HashAlgorithm::Sha256)
+            .expect("sha256")
+            .update(&[0x00])
+            .update(key)
+            .update(value)
+            .finalize()
+    }
+
+    #[test]
+    fn empty_certificate_only_verifies_empty_root() {
+        let certificate = NonInclusionCertificate::decode(&[]).unwrap();
+        let target = state_id([7u8; 32]);
+        assert!(certificate.is_empty());
+        assert_eq!(certificate.verify(&target, None), Ok(()));
+        assert_eq!(
+            certificate.verify(&target, Some(&leaf_root(&[1; 32], &[2; 32]))),
+            Err(VerificationError::NonInclusionCertificateInvalid)
+        );
+        assert!(certificate.encode().is_empty());
+    }
+
+    #[test]
+    fn singleton_terminal_proves_another_key_absent() {
+        let terminal_key = [1u8; 32];
+        let terminal_value = [2u8; 32];
+        let mut encoded = vec![0u8; BITMAP_SIZE];
+        encoded.extend_from_slice(&terminal_key);
+        encoded.extend_from_slice(&terminal_value);
+        let certificate = NonInclusionCertificate::decode(&encoded).unwrap();
+        let root = leaf_root(&terminal_key, &terminal_value);
+
+        assert_eq!(
+            certificate.verify(&state_id([3u8; 32]), Some(&root)),
+            Ok(())
+        );
+        assert_eq!(
+            certificate.verify(&state_id(terminal_key), Some(&root)),
+            Err(VerificationError::StateIncluded)
+        );
+        assert_eq!(certificate.encode(), encoded);
+    }
+
+    #[test]
+    fn branch_choice_is_bound_to_target() {
+        let left_key = [0u8; 32];
+        let mut right_key = [0u8; 32];
+        right_key[0] = 0x80;
+        let left_value = [1u8; 32];
+        let right_value = [2u8; 32];
+        let left_hash = leaf_root(&left_key, &left_value);
+        let right_hash = leaf_root(&right_key, &right_value);
+        let root = DataHasher::new(HashAlgorithm::Sha256)
+            .expect("sha256")
+            .update(&[0x01, 0])
+            .update(&[0u8; 32])
+            .update(left_hash.data())
+            .update(right_hash.data())
+            .finalize();
+
+        let mut encoded = vec![0u8; BITMAP_SIZE];
+        encoded[0] = 0x80;
+        encoded.extend_from_slice(right_hash.data());
+        encoded.extend_from_slice(&left_key);
+        encoded.extend_from_slice(&left_value);
+        let certificate = NonInclusionCertificate::decode(&encoded).unwrap();
+
+        let mut target_left = [0u8; 32];
+        target_left[31] = 1;
+        assert_eq!(
+            certificate.verify(&state_id(target_left), Some(&root)),
+            Ok(())
+        );
+
+        let mut target_right = [0u8; 32];
+        target_right[0] = 0x80;
+        target_right[31] = 1;
+        assert_eq!(
+            certificate.verify(&state_id(target_right), Some(&root)),
+            Err(VerificationError::NonInclusionCertificateInvalid)
+        );
+    }
+
+    #[test]
+    fn decoder_rejects_wrong_terminal_or_sibling_lengths() {
+        assert!(NonInclusionCertificate::decode(&[0u8; 32]).is_err());
+
+        let mut one_sibling_without_terminal = vec![0u8; 64];
+        one_sibling_without_terminal[0] = 0x80;
+        assert!(NonInclusionCertificate::decode(&one_sibling_without_terminal).is_err());
+
+        let mut valid_singleton = vec![0u8; 96];
+        valid_singleton.push(0);
+        assert!(NonInclusionCertificate::decode(&valid_singleton).is_err());
+    }
+
+    #[test]
+    fn rugregator_two_leaf_golden_vector_verifies() {
+        // Generated independently by rugregator's rsmt implementation for
+        // leaves 00..00 -> 01..01 and 80..00 -> 02..02, queried at 01..00.
+        let certificate = NonInclusionCertificate::decode(&hex!(
+            "8000000000000000000000000000000000000000000000000000000000000000d79ae116bb8c8604819adc35c2a71b7c3acf89cd1be8a382fbedbd6905ac20e700000000000000000000000000000000000000000000000000000000000000000101010101010101010101010101010101010101010101010101010101010101"
+        ))
+        .unwrap();
+        let root = DataHash::new(
+            HashAlgorithm::Sha256,
+            hex!("5158a5f4029511f5312b7a147c9da48b9281322d1b893a10a25b2c17e2197a53"),
+        )
+        .unwrap();
+        let mut target = [0u8; 32];
+        target[0] = 0x01;
+
+        assert_eq!(certificate.verify(&state_id(target), Some(&root)), Ok(()));
+    }
+}

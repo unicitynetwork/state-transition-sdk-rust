@@ -68,6 +68,10 @@ pub enum VerificationError {
     TransactionHashMismatch,
     /// The sparse-Merkle-tree path did not reproduce the expected root.
     PathInvalid,
+    /// The non-inclusion certificate did not authenticate against the certified root.
+    NonInclusionCertificateInvalid,
+    /// The requested state was present at the certified root.
+    StateIncluded,
     /// The certified shard does not contain the state id.
     ShardMismatch,
     /// The unicity seal's network id does not match the trust base.
@@ -169,6 +173,12 @@ impl fmt::Display for VerificationError {
             }
             VerificationError::TransactionHashMismatch => write!(f, "transaction hash mismatch"),
             VerificationError::PathInvalid => write!(f, "inclusion path invalid"),
+            VerificationError::NonInclusionCertificateInvalid => {
+                write!(f, "non-inclusion certificate invalid")
+            }
+            VerificationError::StateIncluded => {
+                write!(f, "state is included at the certified root")
+            }
             VerificationError::ShardMismatch => write!(f, "shard does not contain state id"),
             VerificationError::SealNetworkMismatch => {
                 write!(f, "unicity seal network does not match trust base")

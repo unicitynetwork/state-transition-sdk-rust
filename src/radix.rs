@@ -8,6 +8,8 @@
 //!
 //! Bit `i` is the `(i % 8)`-th most-significant bit of byte `i / 8`.
 
+use crate::crypto::hash::{DataHash, DataHasher, HashAlgorithm};
+
 pub(crate) const KEY_BITS: usize = 256;
 pub(crate) const MAX_DEPTH: usize = KEY_BITS - 1;
 
@@ -41,6 +43,52 @@ pub(crate) fn prefix_region(key: &[u8; 32], depth: usize) -> [u8; 32] {
     }
 
     region
+}
+
+/// Fold one authenticated radix path from its terminal leaf to the root.
+///
+/// `target_key` controls key-directed descent; `terminal_key` controls the leaf
+/// hash, node regions, and child orientation.  Requiring both keys to choose
+/// the same side at every actual junction is essential for non-inclusion
+/// soundness.  Inclusion passes the same key for both arguments.
+pub(crate) fn fold_certificate_path(
+    bitmap: &[u8; 32],
+    siblings: &[[u8; 32]],
+    target_key: &[u8; 32],
+    terminal_key: &[u8; 32],
+    terminal_value: &[u8],
+) -> Option<DataHash> {
+    let mut hash = DataHasher::new(HashAlgorithm::Sha256)
+        .expect("sha256")
+        .update(&[0x00])
+        .update(terminal_key)
+        .update(terminal_value)
+        .finalize();
+
+    let mut position = siblings.len();
+    for depth in (0..=MAX_DEPTH).rev() {
+        if !bit_at(bitmap, depth) {
+            continue;
+        }
+        if position == 0 || bit_at(target_key, depth) != bit_at(terminal_key, depth) {
+            return None;
+        }
+        position -= 1;
+        let sibling = &siblings[position];
+        let region = prefix_region(terminal_key, depth);
+        let node = DataHasher::new(HashAlgorithm::Sha256)
+            .expect("sha256")
+            .update(&[0x01, depth as u8])
+            .update(&region);
+        hash = if bit_at(terminal_key, depth) {
+            node.update(sibling).update(hash.data())
+        } else {
+            node.update(hash.data()).update(sibling)
+        }
+        .finalize();
+    }
+
+    (position == 0).then_some(hash)
 }
 
 #[cfg(test)]

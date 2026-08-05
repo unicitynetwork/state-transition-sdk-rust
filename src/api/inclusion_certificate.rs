@@ -9,13 +9,13 @@
 use alloc::vec::Vec;
 
 use crate::api::state_id::StateId;
-use crate::crypto::hash::{DataHash, DataHasher, HashAlgorithm};
+use crate::crypto::hash::DataHash;
 use crate::error::Error;
 
 const BITMAP_SIZE: usize = 32;
 const HASH_SIZE: usize = 32;
 
-use crate::radix::{bit_at, prefix_region, MAX_DEPTH};
+use crate::radix::fold_certificate_path;
 
 /// A sparse-Merkle-tree inclusion path.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,38 +76,8 @@ impl InclusionCertificate {
         expected_root: &DataHash,
     ) -> bool {
         let key = leaf_key.bytes();
-        let mut hash = DataHasher::new(HashAlgorithm::Sha256)
-            .expect("sha256")
-            .update(&[0x00])
-            .update(key)
-            .update(leaf_value.data())
-            .finalize();
-
-        let mut position = self.siblings.len();
-        for depth in (0..=MAX_DEPTH).rev() {
-            if !bit_at(&self.bitmap, depth) {
-                continue;
-            }
-            if position == 0 {
-                return false;
-            }
-            position -= 1;
-            let sibling = &self.siblings[position];
-            let region = prefix_region(key, depth);
-
-            let h = DataHasher::new(HashAlgorithm::Sha256)
-                .expect("sha256")
-                .update(&[0x01, depth as u8])
-                .update(&region);
-            hash = if bit_at(key, depth) {
-                h.update(sibling).update(hash.data())
-            } else {
-                h.update(hash.data()).update(sibling)
-            }
-            .finalize();
-        }
-
-        position == 0 && &hash == expected_root
+        fold_certificate_path(&self.bitmap, &self.siblings, key, key, leaf_value.data())
+            .is_some_and(|hash| &hash == expected_root)
     }
 }
 
@@ -115,6 +85,8 @@ impl InclusionCertificate {
 mod tests {
     use super::*;
     use crate::cbor::{encode_byte_string, Decoder};
+    use crate::crypto::hash::{DataHasher, HashAlgorithm};
+    use crate::radix::prefix_region;
 
     fn data_hash(bytes: [u8; 32]) -> DataHash {
         DataHash::new(HashAlgorithm::Sha256, bytes).unwrap()
