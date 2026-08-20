@@ -208,6 +208,7 @@ fn rejects_mismatched_transfer_certification_state() {
         data.lock_script().clone(),
         sha256(b"unrelated source state"),
         data.transaction_hash().clone(),
+        data.timeout(),
         data.unlock_script().to_vec(),
     ));
 

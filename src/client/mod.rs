@@ -123,6 +123,7 @@ pub fn mint<A: AggregatorClient>(
     trust_base: &RootTrustBase,
     network: NetworkId,
     recipient: &impl Predicate,
+    timeout: u64,
     token_type: TokenType,
     salt: TokenSalt,
     data: Option<Vec<u8>>,
@@ -137,6 +138,7 @@ pub fn mint<A: AggregatorClient>(
     let transaction = MintTransaction::create(
         network,
         EncodedPredicate::from_predicate(recipient),
+        timeout,
         token_type,
         salt,
         data,
@@ -170,12 +172,14 @@ pub fn mint<A: AggregatorClient>(
 
 /// Transfer `token` to `recipient`, authorised by `signer` (the current
 /// owner's key), and return the verified successor [`Token`].
+#[allow(clippy::too_many_arguments)]
 pub fn transfer<A: AggregatorClient>(
     aggregator: &A,
     trust_base: &RootTrustBase,
     token: &Token,
     recipient: &impl Predicate,
     signer: &impl Signer,
+    timeout: u64,
     state_mask: StateMask,
     data: Option<Vec<u8>>,
 ) -> Result<Token, ClientError<A::Error>> {
@@ -187,6 +191,7 @@ pub fn transfer<A: AggregatorClient>(
         source_state_hash,
         lock_script,
         EncodedPredicate::from_predicate(recipient),
+        timeout,
         state_mask.bytes().to_vec(),
         data,
     );
@@ -218,6 +223,9 @@ pub fn transfer<A: AggregatorClient>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Exclusive certification request timeout used by these tests.
+    const TIMEOUT: u64 = 1755000000;
     use crate::crypto::signature::PublicKey;
     use crate::predicate::builtin::SignaturePredicate;
     use core::cell::RefCell;
@@ -278,6 +286,7 @@ mod tests {
             &trust_base,
             NetworkId::MAINNET,
             &recipient,
+            TIMEOUT,
             TokenType::new([0u8; 32]),
             TokenSalt::from_bytes([0u8; 32]),
             None,
@@ -290,7 +299,7 @@ mod tests {
         assert_eq!(
             captured,
             hex!(
-                "d998778501d9987883014101582103a19eef04b8856f50bf2d688b0d8804575115e53d2a7780da363628343f9635075820e4b183ff6b7a399983cee26e4feea85d517dede0142def5c838e593a9e6152415820df524cffc08a1dc30579a8a51f440a97b30630988084f8d12a4d8bd741c7791258419efb637f14dbdaada6e293e2182932d82265b04b1abf4f28bc4c285b32b5e2325140fe7f94bc9b705c568b4fcb7f9ea90cf0fadcacc1b4504275f81558aad1e700"
+                "d998778601d9987883014101582103a19eef04b8856f50bf2d688b0d8804575115e53d2a7780da363628343f9635075820e4b183ff6b7a399983cee26e4feea85d517dede0142def5c838e593a9e615241582068a39b55a025f3fc4ff80be2ee8231dbe02afe151279b19fc457d39a6281720b1a689b2cc05841ded0fa3fa2773d2e52d4db8918f883e50be7cdcd351b16bbded03bb2c54f80c130cb08befdfe0f6c78c2e925645f3804953ad41d6f043e9ab8aa81740cbd8f8800"
             )
         );
     }

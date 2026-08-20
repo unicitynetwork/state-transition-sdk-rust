@@ -28,6 +28,7 @@ pub struct TransferTransaction {
     lock_script: EncodedPredicate,
     // On the wire:
     recipient: EncodedPredicate,
+    timeout: u64,
     state_mask: Vec<u8>,
     data: Option<Vec<u8>>,
 }
@@ -40,6 +41,7 @@ impl TransferTransaction {
         source_state_hash: DataHash,
         lock_script: EncodedPredicate,
         recipient: EncodedPredicate,
+        timeout: u64,
         state_mask: Vec<u8>,
         data: Option<Vec<u8>>,
     ) -> Self {
@@ -47,6 +49,7 @@ impl TransferTransaction {
             source_state_hash,
             lock_script,
             recipient,
+            timeout,
             state_mask,
             data,
         }
@@ -70,7 +73,7 @@ impl TransferTransaction {
         lock_script: EncodedPredicate,
     ) -> Result<Self, Error> {
         let inner = d.expect_tag(TRANSFER_TRANSACTION_TAG)?;
-        let items = inner.array(Some(4))?;
+        let items = inner.array(Some(5))?;
         let version = items[0].uint()?;
         if version != VERSION {
             return Err(Error::UnexpectedValue(
@@ -81,10 +84,12 @@ impl TransferTransaction {
         let state_mask = items[2].bytes_value()?.to_vec();
         let data =
             items[3].nullable(|d| d.bytes_value().map(|b| b.to_vec()).map_err(Into::into))?;
+        let timeout = items[4].uint()?;
         Ok(TransferTransaction::new(
             source_state_hash,
             lock_script,
             recipient,
+            timeout,
             state_mask,
             data,
         ))
@@ -104,6 +109,10 @@ impl Transaction for TransferTransaction {
         &self.source_state_hash
     }
 
+    fn timeout(&self) -> u64 {
+        self.timeout
+    }
+
     fn calculate_state_hash(&self) -> DataHash {
         sha256(&encode_array(&[
             &encode_byte_string(&self.source_state_hash.imprint()),
@@ -119,6 +128,7 @@ impl Transaction for TransferTransaction {
                 &self.recipient.to_cbor(),
                 &encode_byte_string(&self.state_mask),
                 &encode_nullable(self.data.as_ref(), |v| encode_byte_string(v)),
+                &encode_uint(self.timeout),
             ]),
         )
     }

@@ -176,6 +176,7 @@ fn verify_inclusion_proof(
 
     if certification_data.lock_script() != transaction.lock_script()
         || certification_data.source_state_hash() != transaction.source_state_hash()
+        || certification_data.timeout() != transaction.timeout()
     {
         return Err(VerificationError::CertificationDataMismatch);
     }
@@ -226,6 +227,11 @@ pub fn verify_inclusion_proof_for(
     );
     if &certified_state_id != state_id {
         return Err(VerificationError::CertificationDataMismatch);
+    }
+
+    // The request was admissible only in a round strictly before its timeout.
+    if reference_time >= certification_data.timeout() {
+        return Err(VerificationError::RequestExpired);
     }
 
     let expected_root = DataHash::new(
@@ -391,6 +397,8 @@ mod tests {
 
     /// Reference time every fixture in this module certifies under.
     const REFERENCE_TIME: u64 = 1755000000;
+    /// Exclusive certification request timeout every fixture in this module uses.
+    const TIMEOUT: u64 = 1755003600;
 
     use alloc::string::{String, ToString};
 
@@ -532,6 +540,7 @@ mod tests {
             transaction.lock_script().clone(),
             transaction.source_state_hash().clone(),
             tx_hash,
+            transaction.timeout(),
             unlock,
         );
         InclusionProof {
@@ -547,6 +556,7 @@ mod tests {
             sha256(b"source-state"),
             SignaturePredicate::new(owner.public_key()).to_encoded(),
             SignaturePredicate::new(recipient.public_key()).to_encoded(),
+            TIMEOUT,
             alloc::vec![7u8; 32],
             None,
         )
@@ -732,6 +742,7 @@ mod tests {
             SignaturePredicate::new(stranger.public_key()).to_encoded(), // wrong lock
             c.source_state_hash().clone(),
             c.transaction_hash().clone(),
+            TIMEOUT,
             c.unlock_script().to_vec(),
         ));
         assert_eq!(
@@ -748,6 +759,7 @@ mod tests {
             c.lock_script().clone(),
             sha256(b"a-different-source-state"), // wrong source
             c.transaction_hash().clone(),
+            TIMEOUT,
             c.unlock_script().to_vec(),
         ));
         assert_eq!(
@@ -764,6 +776,7 @@ mod tests {
             c.lock_script().clone(),
             c.source_state_hash().clone(),
             sha256(b"not-the-tx-hash"), // wrong tx hash
+            TIMEOUT,
             c.unlock_script().to_vec(),
         ));
         assert_eq!(
@@ -849,6 +862,7 @@ mod tests {
             c.lock_script().clone(),
             c.source_state_hash().clone(),
             c.transaction_hash().clone(),
+            TIMEOUT,
             unlock,
         ));
         assert_eq!(
@@ -880,6 +894,7 @@ mod tests {
         let mint = MintTransaction::create(
             NetworkId::LOCAL,
             SignaturePredicate::new(recipient.public_key()).to_encoded(),
+            TIMEOUT,
             TokenType::new(alloc::vec![0xAA; 32]),
             TokenSalt::from_bytes([0x66; 32]),
             None,
@@ -936,6 +951,7 @@ mod tests {
             SignaturePredicate::new(stranger.public_key()).to_encoded(),
             c.source_state_hash().clone(),
             c.transaction_hash().clone(),
+            TIMEOUT,
             c.unlock_script().to_vec(),
         ));
         let token = Token::new(
@@ -1051,6 +1067,7 @@ mod tests {
             genesis.result_state_hash(),
             genesis.recipient().clone(),
             SignaturePredicate::new(recipient.public_key()).to_encoded(),
+            TIMEOUT,
             alloc::vec![9u8; 32],
             None,
         );
@@ -1103,6 +1120,7 @@ mod tests {
             genesis.result_state_hash(),
             genesis.recipient().clone(),
             SignaturePredicate::new(recipient.public_key()).to_encoded(),
+            TIMEOUT,
             alloc::vec![9u8; 32],
             None,
         );

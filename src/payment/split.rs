@@ -135,7 +135,8 @@ impl TokenSplit {
     /// the source is itself a split output).
     ///
     /// `decode_payment_data` extracts the source token's [`PaymentAssetCollection`]
-    /// from its mint `data`. `burn_state_mask` sets the burn transfer's state
+    /// from its mint `data`. `burn_timeout` is the burn transfer's exclusive
+    /// certification request timeout. `burn_state_mask` sets the burn transfer's state
     /// mask; pass `None` for a random mask (requires the `std` RNG) or a fixed
     /// value for a reproducible, crash-resumable burn.
     ///
@@ -147,11 +148,13 @@ impl TokenSplit {
         registry: &MintJustificationRegistry,
         decode_payment_data: PaymentDataDecoder,
         requests: Vec<SplitTokenRequest>,
+        burn_timeout: u64,
         burn_state_mask: Option<[u8; 32]>,
     ) -> Result<Split, SplitError> {
         let assets = verify_payment_token(token, trust_base, registry, decode_payment_data)
             .map_err(SplitError::Verification)?;
-        Self::build_split(token, assets, requests, burn_state_mask).map_err(SplitError::Build)
+        Self::build_split(token, assets, requests, burn_timeout, burn_state_mask)
+            .map_err(SplitError::Build)
     }
 
     /// Split `token` **without verifying it first**.
@@ -166,6 +169,7 @@ impl TokenSplit {
         token: &Token,
         decode_payment_data: PaymentDataDecoder,
         requests: Vec<SplitTokenRequest>,
+        burn_timeout: u64,
         burn_state_mask: Option<[u8; 32]>,
     ) -> Result<Split, Error> {
         let source_bytes = token
@@ -174,7 +178,7 @@ impl TokenSplit {
             .data()
             .ok_or(Error::UnexpectedValue("source token has no payment data"))?;
         let assets = decode_payment_data(source_bytes)?;
-        Self::build_split(token, assets, requests, burn_state_mask)
+        Self::build_split(token, assets, requests, burn_timeout, burn_state_mask)
     }
 
     /// Construct the split from the source token's already-decoded canonical
@@ -184,6 +188,7 @@ impl TokenSplit {
         token: &Token,
         assets: PaymentAssetCollection,
         requests: Vec<SplitTokenRequest>,
+        burn_timeout: u64,
         burn_state_mask: Option<[u8; 32]>,
     ) -> Result<Split, Error> {
         let network_id = token.genesis().transaction().network_id();
@@ -257,6 +262,7 @@ impl TokenSplit {
             source_state_hash,
             lock_script,
             burn_predicate.to_encoded(),
+            burn_timeout,
             mask.to_vec(),
             Some(manifest_bytes.clone()),
         );

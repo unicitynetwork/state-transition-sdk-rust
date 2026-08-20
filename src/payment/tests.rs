@@ -40,6 +40,8 @@ use crate::verify::{
 
 /// Reference time every fixture in this module certifies under.
 const REFERENCE_TIME: u64 = 1755000000;
+/// Exclusive certification request timeout every fixture in this module uses.
+const TIMEOUT: u64 = 1755003600;
 
 // --- proof construction (mirrors the verify-engine test harness) -----------
 
@@ -136,6 +138,7 @@ fn valid_proof(
         transaction.lock_script().clone(),
         transaction.source_state_hash().clone(),
         tx_hash,
+        transaction.timeout(),
         unlock,
     );
     InclusionProof {
@@ -171,6 +174,7 @@ fn source_token(node: &Secp256k1Signer, owner: &Secp256k1Signer) -> Token {
     let mint = MintTransaction::create(
         NetworkId::LOCAL,
         sig_pred(owner),
+        TIMEOUT,
         coin_type(),
         TokenSalt::from_bytes([0x01; 32]),
         Some(payment.to_cbor()),
@@ -216,6 +220,7 @@ fn mint_output(
     let mint = MintTransaction::create(
         network,
         recipient,
+        TIMEOUT,
         token_type,
         salt,
         Some(assets.to_cbor()),
@@ -335,6 +340,7 @@ fn forged_output_with_type(
         source_state_hash,
         lock_script,
         burn_predicate.to_encoded(),
+        TIMEOUT,
         vec![9u8; 32],
         Some(manifest.to_cbor()),
     );
@@ -376,6 +382,7 @@ fn split_outputs_verify_end_to_end() {
         &registry,
         PaymentAssetCollection::from_cbor_bytes,
         s.requests,
+        TIMEOUT,
         Some([7u8; 32]),
     )
     .unwrap();
@@ -462,6 +469,7 @@ fn recursive_split_verification_honors_shared_depth_limit() {
         &registry(),
         PaymentAssetCollection::from_cbor_bytes,
         s.requests,
+        TIMEOUT,
         Some([7u8; 32]),
     )
     .unwrap();
@@ -525,6 +533,7 @@ fn rejects_tampered_output_amount() {
         &registry(),
         PaymentAssetCollection::from_cbor_bytes,
         s.requests,
+        TIMEOUT,
         Some([7u8; 32]),
     )
     .unwrap();
@@ -563,6 +572,7 @@ fn rejects_dropped_proof() {
         &registry(),
         PaymentAssetCollection::from_cbor_bytes,
         s.requests,
+        TIMEOUT,
         Some([7u8; 32]),
     )
     .unwrap();
@@ -597,6 +607,7 @@ fn rejects_wrong_burn_predicate() {
         &registry(),
         PaymentAssetCollection::from_cbor_bytes,
         s.requests,
+        TIMEOUT,
         Some([7u8; 32]),
     )
     .unwrap();
@@ -609,6 +620,7 @@ fn rejects_wrong_burn_predicate() {
         source_state_hash,
         lock_script,
         BurnPredicate::new(b"not-the-manifest-hash".to_vec()).to_encoded(),
+        TIMEOUT,
         vec![7u8; 32],
         Some(split.burn.manifest.clone()),
     );
@@ -657,6 +669,7 @@ fn rejects_missing_manifest() {
         &registry(),
         PaymentAssetCollection::from_cbor_bytes,
         s.requests,
+        TIMEOUT,
         Some([7u8; 32]),
     )
     .unwrap();
@@ -666,6 +679,7 @@ fn rejects_missing_manifest() {
         source_state_hash,
         lock_script,
         BurnPredicate::new(b"x".to_vec()).to_encoded(),
+        TIMEOUT,
         vec![3u8; 32],
         None,
     );
@@ -696,6 +710,7 @@ fn rejects_manifest_length_mismatch() {
         &registry(),
         PaymentAssetCollection::from_cbor_bytes,
         s.requests,
+        TIMEOUT,
         Some([7u8; 32]),
     )
     .unwrap();
@@ -707,6 +722,7 @@ fn rejects_manifest_length_mismatch() {
         source_state_hash,
         lock_script,
         BurnPredicate::new(short.reason_hash().to_vec()).to_encoded(),
+        TIMEOUT,
         vec![4u8; 32],
         Some(short.to_cbor()),
     );
@@ -747,6 +763,7 @@ fn rejects_wrong_output_token_type() {
         &s.source,
         PaymentAssetCollection::from_cbor_bytes,
         bad,
+        TIMEOUT,
         Some([7u8; 32]),
     )
     .is_err());
@@ -771,6 +788,7 @@ fn rejects_unbalanced_split_at_build_time() {
         &s.source,
         PaymentAssetCollection::from_cbor_bytes,
         bad,
+        TIMEOUT,
         Some([7u8; 32]),
     )
     .is_err());

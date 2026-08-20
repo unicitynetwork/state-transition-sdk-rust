@@ -25,6 +25,7 @@ const VERSION: u64 = 1;
 pub struct MintTransaction {
     network_id: NetworkId,
     recipient: EncodedPredicate,
+    timeout: u64,
     salt: TokenSalt,
     token_type: TokenType,
     justification: Option<Vec<u8>>,
@@ -41,6 +42,7 @@ impl MintTransaction {
     pub fn create(
         network_id: NetworkId,
         recipient: EncodedPredicate,
+        timeout: u64,
         token_type: TokenType,
         salt: TokenSalt,
         data: Option<Vec<u8>>,
@@ -52,6 +54,7 @@ impl MintTransaction {
         Ok(MintTransaction {
             network_id,
             recipient,
+            timeout,
             salt,
             token_type,
             justification,
@@ -90,7 +93,7 @@ impl MintTransaction {
     /// Decode from CBOR (tagged), re-deriving the lock script / mint state.
     pub fn from_cbor(d: Decoder<'_>) -> Result<Self, Error> {
         let inner = d.expect_tag(MINT_TRANSACTION_TAG)?;
-        let items = inner.array(Some(7))?;
+        let items = inner.array(Some(8))?;
         let version = items[0].uint()?;
         if version != VERSION {
             return Err(Error::UnexpectedValue(
@@ -108,7 +111,16 @@ impl MintTransaction {
             items[5].nullable(|d| d.bytes_value().map(|b| b.to_vec()).map_err(Into::into))?;
         let data =
             items[6].nullable(|d| d.bytes_value().map(|b| b.to_vec()).map_err(Into::into))?;
-        MintTransaction::create(network_id, recipient, token_type, salt, data, justification)
+        let timeout = items[7].uint()?;
+        MintTransaction::create(
+            network_id,
+            recipient,
+            timeout,
+            token_type,
+            salt,
+            data,
+            justification,
+        )
     }
 }
 
@@ -123,6 +135,10 @@ impl Transaction for MintTransaction {
 
     fn source_state_hash(&self) -> &DataHash {
         self.source_state.hash()
+    }
+
+    fn timeout(&self) -> u64 {
+        self.timeout
     }
 
     fn calculate_state_hash(&self) -> DataHash {
@@ -144,6 +160,7 @@ impl Transaction for MintTransaction {
                 &self.token_type.to_cbor(),
                 &encode_nullable(self.justification.as_ref(), |v| encode_byte_string(v)),
                 &encode_nullable(self.data.as_ref(), |v| encode_byte_string(v)),
+                &encode_uint(self.timeout),
             ]),
         )
     }

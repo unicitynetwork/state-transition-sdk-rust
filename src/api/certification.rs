@@ -24,6 +24,7 @@ pub struct CertificationData {
     lock_script: EncodedPredicate,
     source_state_hash: DataHash,
     transaction_hash: DataHash,
+    timeout: u64,
     unlock_script: Vec<u8>,
 }
 
@@ -33,12 +34,14 @@ impl CertificationData {
         lock_script: EncodedPredicate,
         source_state_hash: DataHash,
         transaction_hash: DataHash,
+        timeout: u64,
         unlock_script: Vec<u8>,
     ) -> Self {
         CertificationData {
             lock_script,
             source_state_hash,
             transaction_hash,
+            timeout,
             unlock_script,
         }
     }
@@ -50,6 +53,7 @@ impl CertificationData {
             lock_script: transaction.lock_script().clone(),
             source_state_hash: transaction.source_state_hash().clone(),
             transaction_hash: transaction.calculate_transaction_hash(),
+            timeout: transaction.timeout(),
             unlock_script,
         }
     }
@@ -66,6 +70,10 @@ impl CertificationData {
     pub fn transaction_hash(&self) -> &DataHash {
         &self.transaction_hash
     }
+    /// The exclusive timeout of the certification request.
+    pub fn timeout(&self) -> u64 {
+        self.timeout
+    }
     /// The unlock script (witness).
     pub fn unlock_script(&self) -> &[u8] {
         &self.unlock_script
@@ -80,6 +88,7 @@ impl CertificationData {
                 &self.lock_script.to_cbor(),
                 &encode_byte_string(self.source_state_hash.data()),
                 &encode_byte_string(self.transaction_hash.data()),
+                &encode_uint(self.timeout),
                 &encode_byte_string(&self.unlock_script),
             ]),
         )
@@ -88,7 +97,7 @@ impl CertificationData {
     /// Decode from CBOR. The reference SDKs always store SHA-256 hashes here.
     pub fn from_cbor(d: Decoder<'_>) -> Result<Self, Error> {
         let inner = d.expect_tag(CERTIFICATION_DATA_TAG)?;
-        let items = inner.array(Some(5))?;
+        let items = inner.array(Some(6))?;
         let version = items[0].uint()?;
         if version != VERSION {
             return Err(Error::UnexpectedValue(
@@ -99,7 +108,8 @@ impl CertificationData {
             lock_script: EncodedPredicate::from_cbor(items[1])?,
             source_state_hash: DataHash::new(HashAlgorithm::Sha256, items[2].bytes_value()?)?,
             transaction_hash: DataHash::new(HashAlgorithm::Sha256, items[3].bytes_value()?)?,
-            unlock_script: items[4].bytes_value()?.to_vec(),
+            timeout: items[4].uint()?,
+            unlock_script: items[5].bytes_value()?.to_vec(),
         })
     }
 }
@@ -107,6 +117,9 @@ impl CertificationData {
 #[cfg(all(test, feature = "client"))]
 mod tests {
     use super::*;
+
+    /// Exclusive certification request timeout used by the golden vector.
+    const TIMEOUT: u64 = 1755000000;
     use crate::api::network_id::NetworkId;
     use crate::crypto::signature::PublicKey;
     use crate::predicate::builtin::SignaturePredicate;
@@ -131,6 +144,7 @@ mod tests {
         let mint = MintTransaction::create(
             NetworkId::MAINNET,
             recipient,
+            TIMEOUT,
             TokenType::new([0u8; 32]),
             TokenSalt::from_bytes([0u8; 32]),
             None,
@@ -147,7 +161,7 @@ mod tests {
         assert_eq!(
             cert.to_cbor(),
             hex!(
-                "d998778501d9987883014101582103a19eef04b8856f50bf2d688b0d8804575115e53d2a7780da363628343f9635075820e4b183ff6b7a399983cee26e4feea85d517dede0142def5c838e593a9e6152415820df524cffc08a1dc30579a8a51f440a97b30630988084f8d12a4d8bd741c7791258419efb637f14dbdaada6e293e2182932d82265b04b1abf4f28bc4c285b32b5e2325140fe7f94bc9b705c568b4fcb7f9ea90cf0fadcacc1b4504275f81558aad1e700"
+                "d998778601d9987883014101582103a19eef04b8856f50bf2d688b0d8804575115e53d2a7780da363628343f9635075820e4b183ff6b7a399983cee26e4feea85d517dede0142def5c838e593a9e615241582068a39b55a025f3fc4ff80be2ee8231dbe02afe151279b19fc457d39a6281720b1a689b2cc05841ded0fa3fa2773d2e52d4db8918f883e50be7cdcd351b16bbded03bb2c54f80c130cb08befdfe0f6c78c2e925645f3804953ad41d6f043e9ab8aa81740cbd8f8800"
             )
         );
 
