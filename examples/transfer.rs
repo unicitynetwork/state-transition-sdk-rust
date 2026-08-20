@@ -9,7 +9,7 @@
 //!   cargo run --example transfer --features http
 
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use unicity_token::api::bft::RootTrustBase;
 use unicity_token::cbor::encode_text_string;
@@ -21,6 +21,14 @@ use unicity_token::transaction::Token;
 
 const DEFAULT_GATEWAY: &str = "https://gateway.testnet2.unicity.network/";
 const DEFAULT_TRUSTBASE: &str = "bft-trustbase.testnet2.json";
+
+fn request_timeout() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before Unix epoch")
+        .as_secs()
+        + 3600
+}
 
 /// Build an aggregator client and its trust base from `e2e/.env`.
 fn load() -> (HttpAggregatorClient, RootTrustBase) {
@@ -60,6 +68,7 @@ fn main() {
         &trust_base,
         trust_base.network_id,
         &SignaturePredicate::new(alice.public_key()),
+        request_timeout(),
         TokenType::random().expect("token type"),
         TokenSalt::random().expect("salt"),
         Some(encode_text_string("My custom data")),
@@ -80,6 +89,7 @@ fn main() {
         &token,
         &SignaturePredicate::new(bob.public_key()),
         &alice,
+        request_timeout(),
         StateMask::random().expect("state mask"),
         Some(encode_text_string("My custom transfer data")),
     )

@@ -37,6 +37,11 @@ fn read_service() -> (String, Option<String>) {
 #[test]
 #[ignore = "hits the live testnet2 gateway"]
 fn e2e_mint_transfer_verify() {
+    let timeout = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock before Unix epoch")
+        .as_secs()
+        + 3600;
     let (gateway, api_key) = read_service();
     let trust_json =
         std::fs::read_to_string("e2e/bft-trustbase.testnet2.json").expect("trust base file");
@@ -56,6 +61,7 @@ fn e2e_mint_transfer_verify() {
         &trust_base,
         trust_base.network_id,
         &SignaturePredicate::new(alice.public_key()),
+        timeout,
         TokenType::random().unwrap(),
         TokenSalt::random().unwrap(),
         None,
@@ -70,6 +76,7 @@ fn e2e_mint_transfer_verify() {
         &token,
         &SignaturePredicate::new(bob.public_key()),
         &alice,
+        timeout,
         StateMask::random().unwrap(),
         None,
     )

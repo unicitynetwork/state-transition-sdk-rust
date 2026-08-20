@@ -2,7 +2,7 @@ use std::env;
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use unicity_token::api::bft::RootTrustBase;
 use unicity_token::cbor::encode_text_string;
@@ -15,6 +15,10 @@ use unicity_token::transaction::Token;
 const DEFAULT_GATEWAY: &str = "https://gateway.testnet2.unicity.network/";
 const DEFAULT_TRUSTBASE: &str = "bft-trustbase.testnet2.json";
 const DEFAULT_OUTPUT_DIR: &str = "artifacts";
+
+fn request_timeout() -> Result<u64, Box<dyn Error>> {
+    Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() + 3600)
+}
 
 fn main() -> Result<(), Box<dyn Error>> {
     // Load local development configuration without overriding variables that
@@ -52,6 +56,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         &trust_base,
         trust_base.network_id,
         &alice_lock,
+        request_timeout()?,
         TokenType::random()?,
         TokenSalt::random()?,
         Some(encode_text_string("Rust SDK live e2e mint")),
@@ -71,6 +76,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         &minted,
         &bob_lock,
         &alice,
+        request_timeout()?,
         StateMask::random()?,
         Some(encode_text_string("Rust SDK live e2e transfer")),
     )?;

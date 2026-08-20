@@ -330,6 +330,7 @@ fn get_inclusion_proof_returns_complete_proof() {
 fn get_inclusion_proof_rejects_incomplete_response_without_polling() {
     let (proof, data) = fixture_proof_and_data();
     let incomplete = InclusionProof {
+        reference_time: proof.reference_time,
         certification_data: None,
         inclusion_certificate: None,
         unicity_certificate: proof.unicity_certificate.clone(),
