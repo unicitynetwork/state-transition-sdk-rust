@@ -60,9 +60,14 @@ Service assign a default one from consensus time, or explicitly `Some(deadline)`
 The SDK is generic over the `AggregatorClient` trait, so you can plug in any
 transport (or an in-memory one for tests); `HttpAggregatorClient` is the
 batteries-included blocking JSON-RPC implementation.
-Inclusion polling is limited to the server's explicit `-32003` pending status;
-an unknown StateID fails immediately as `HttpError::StateNotFound` instead of
-consuming the polling budget.
+Inclusion polling accepts either way a server reports a leaf that is not
+certified yet: an explicit `-32021` pending status, or a successful response
+whose leaf fields are absent. `get_inclusion_proof.v2` never answers with a
+non-inclusion proof, so the empty response is unambiguous. Only the explicit
+status lets the client tell "not yet" apart from "no such state": against a
+server that reports it, an unknown StateID fails immediately as
+`HttpError::StateNotFound` rather than consuming the polling budget; against one
+that does not, it polls to the attempt limit.
 
 ## Prove that a state is absent
 

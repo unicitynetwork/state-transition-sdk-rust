@@ -57,6 +57,20 @@ fn proof_response_hex(proof: &InclusionProof) -> String {
     hex::encode(body)
 }
 
+/// The same wrapper for a leaf that is not certified yet: the three leaf fields
+/// are absent together, which is what aggregator-go returns while pending.
+fn empty_proof_response_hex(proof: &InclusionProof) -> String {
+    let pending = InclusionProof {
+        certification_data: None,
+        reference_time: None,
+        inclusion_certificate: None,
+        unicity_certificate: proof.unicity_certificate.clone(),
+    };
+    let block = encode_uint(7);
+    let body = encode_array(&[block.as_slice(), pending.to_cbor().as_slice()]);
+    hex::encode(body)
+}
+
 fn fixture_non_inclusion_proof() -> NonInclusionProof {
     let (inclusion, _) = fixture_proof_and_data();
     NonInclusionProof::new(
@@ -348,7 +362,7 @@ fn get_inclusion_proof_rejects_incomplete_response_without_polling() {
 
 #[test]
 fn get_inclusion_proof_fails_fast_for_unknown_state() {
-    let body = r#"{"jsonrpc":"2.0","id":"1","error":{"code":-32001,"message":"not found"}}"#;
+    let body = r#"{"jsonrpc":"2.0","id":"1","error":{"code":-32020,"message":"not found"}}"#;
     let server = MockServer::start(vec![http_response("404 Not Found", body)]);
     let (_, data) = fixture_proof_and_data();
     let state_id = StateId::derive(data.lock_script(), data.source_state_hash());
@@ -360,12 +374,33 @@ fn get_inclusion_proof_fails_fast_for_unknown_state() {
     assert_eq!(server.request_count(), 1);
 }
 
+/// aggregator-go reports a pending leaf in band, as a successful response whose
+/// certification data and inclusion certificate are absent. `get_inclusion_proof
+/// .v2` never answers with a non-inclusion proof, so that response is
+/// unambiguous and the client keeps polling on it.
 #[test]
-fn get_inclusion_proof_polls_only_explicit_pending_status() {
+fn get_inclusion_proof_polls_an_in_band_pending_response() {
+    let (proof, data) = fixture_proof_and_data();
+    let pending = ok_json(&format!("\"{}\"", empty_proof_response_hex(&proof)));
+    let complete = ok_json(&format!("\"{}\"", proof_response_hex(&proof)));
+    let server = MockServer::start(vec![pending.clone(), pending, complete]);
+    let state_id = StateId::derive(data.lock_script(), data.source_state_hash());
+
+    let got = client(&server.url)
+        .get_inclusion_proof(&state_id)
+        .expect("pending request should eventually resolve");
+    assert_eq!(got, proof);
+    assert_eq!(server.request_count(), 3);
+}
+
+/// rugregator reports it out of band instead, which additionally lets the client
+/// tell "not yet" apart from "no such state".
+#[test]
+fn get_inclusion_proof_polls_an_explicit_pending_status() {
     let (proof, data) = fixture_proof_and_data();
     let pending = http_response(
         "200 OK",
-        r#"{"jsonrpc":"2.0","id":"1","error":{"code":-32003,"message":"certification is pending"}}"#,
+        r#"{"jsonrpc":"2.0","id":"1","error":{"code":-32021,"message":"certification is pending"}}"#,
     );
     let complete = ok_json(&format!("\"{}\"", proof_response_hex(&proof)));
     let server = MockServer::start(vec![pending.clone(), pending, complete]);
@@ -417,7 +452,7 @@ fn membership_status_hides_relation_endpoint_selection() {
     let (included_proof, _) = fixture_proof_and_data();
     let relation_false = http_response(
         "200 OK",
-        r#"{"jsonrpc":"2.0","id":"1","error":{"code":-32002,"message":"state is already included"}}"#,
+        r#"{"jsonrpc":"2.0","id":"1","error":{"code":-32022,"message":"state is already included"}}"#,
     );
     let included = MockServer::start(vec![
         relation_false,
@@ -436,7 +471,7 @@ fn non_inclusion_lookup_maps_false_relation_and_missing_root() {
 
     let included = MockServer::start(vec![http_response(
         "200 OK",
-        r#"{"jsonrpc":"2.0","id":"1","error":{"code":-32002,"message":"state is already included"}}"#,
+        r#"{"jsonrpc":"2.0","id":"1","error":{"code":-32022,"message":"state is already included"}}"#,
     )]);
     assert!(matches!(
         client(&included.url).get_non_inclusion_proof(&state_id),
@@ -445,7 +480,7 @@ fn non_inclusion_lookup_maps_false_relation_and_missing_root() {
 
     let unavailable = MockServer::start(vec![http_response(
         "404 Not Found",
-        r#"{"jsonrpc":"2.0","id":"1","error":{"code":-32001,"message":"not found"}}"#,
+        r#"{"jsonrpc":"2.0","id":"1","error":{"code":-32020,"message":"not found"}}"#,
     )]);
     assert!(matches!(
         client(&unavailable.url).get_non_inclusion_proof(&state_id),
