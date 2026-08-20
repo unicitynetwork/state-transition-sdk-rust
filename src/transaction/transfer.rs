@@ -18,8 +18,9 @@ use crate::predicate::EncodedPredicate;
 
 /// CBOR tag for [`TransferTransaction`].
 pub const TRANSFER_TRANSACTION_TAG: u64 = 39045;
-const LEGACY_VERSION: u64 = 1;
-const TIMEOUT_VERSION: u64 = 2;
+/// The only accepted wire version. One version, one element count.
+pub const TRANSFER_TRANSACTION_VERSION: u64 = 2;
+const FIELD_COUNT: usize = 5;
 
 /// A token transfer transaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,7 +30,7 @@ pub struct TransferTransaction {
     lock_script: EncodedPredicate,
     // On the wire:
     recipient: EncodedPredicate,
-    timeout: Option<u64>,
+    expires_at: Option<u64>,
     state_mask: Vec<u8>,
     data: Option<Vec<u8>>,
 }
@@ -38,36 +39,26 @@ impl TransferTransaction {
     /// Construct a transfer from explicit parts. `source_state_hash` and
     /// `lock_script` come from the previous transaction's resulting state /
     /// recipient.
+    ///
+    /// `expires_at` is the exclusive request deadline in Unix seconds, or
+    /// `None` to let the Unicity Service assign one, which requires no local
+    /// clock. Either way it is committed by the transaction hash.
     pub fn new(
         source_state_hash: DataHash,
         lock_script: EncodedPredicate,
         recipient: EncodedPredicate,
         state_mask: Vec<u8>,
         data: Option<Vec<u8>>,
+        expires_at: Option<u64>,
     ) -> Self {
         TransferTransaction {
             source_state_hash,
             lock_script,
             recipient,
-            timeout: None,
+            expires_at,
             state_mask,
             data,
         }
-    }
-
-    /// Construct a transfer with an explicit exclusive request timeout.
-    pub fn new_with_timeout(
-        source_state_hash: DataHash,
-        lock_script: EncodedPredicate,
-        recipient: EncodedPredicate,
-        timeout: u64,
-        state_mask: Vec<u8>,
-        data: Option<Vec<u8>>,
-    ) -> Self {
-        let mut transaction =
-            Self::new(source_state_hash, lock_script, recipient, state_mask, data);
-        transaction.timeout = Some(timeout);
-        transaction
     }
 
     /// The state mask mixed into the resulting state hash.
@@ -88,12 +79,8 @@ impl TransferTransaction {
         lock_script: EncodedPredicate,
     ) -> Result<Self, Error> {
         let inner = d.expect_tag(TRANSFER_TRANSACTION_TAG)?;
-        let items = inner.array(None)?;
-        let version = items[0].uint()?;
-        let has_timeout = version == TIMEOUT_VERSION;
-        if (version != LEGACY_VERSION && version != TIMEOUT_VERSION)
-            || items.len() != if has_timeout { 5 } else { 4 }
-        {
+        let items = inner.array(Some(FIELD_COUNT))?;
+        if items[0].uint()? != TRANSFER_TRANSACTION_VERSION {
             return Err(Error::UnexpectedValue(
                 "unsupported TransferTransaction version",
             ));
@@ -102,18 +89,15 @@ impl TransferTransaction {
         let state_mask = items[2].bytes_value()?.to_vec();
         let data =
             items[3].nullable(|d| d.bytes_value().map(|b| b.to_vec()).map_err(Into::into))?;
-        Ok(if has_timeout {
-            TransferTransaction::new_with_timeout(
-                source_state_hash,
-                lock_script,
-                recipient,
-                items[4].uint()?,
-                state_mask,
-                data,
-            )
-        } else {
-            TransferTransaction::new(source_state_hash, lock_script, recipient, state_mask, data)
-        })
+        let expires_at = items[4].nullable(|d| d.uint().map_err(Into::into))?;
+        Ok(TransferTransaction::new(
+            source_state_hash,
+            lock_script,
+            recipient,
+            state_mask,
+            data,
+            expires_at,
+        ))
     }
 }
 
@@ -130,8 +114,8 @@ impl Transaction for TransferTransaction {
         &self.source_state_hash
     }
 
-    fn timeout(&self) -> Option<u64> {
-        self.timeout
+    fn expires_at(&self) -> Option<u64> {
+        self.expires_at
     }
 
     fn calculate_state_hash(&self) -> DataHash {
@@ -142,22 +126,13 @@ impl Transaction for TransferTransaction {
     }
 
     fn to_cbor(&self) -> Vec<u8> {
-        let payload = if let Some(timeout) = self.timeout {
-            encode_array(&[
-                &encode_uint(TIMEOUT_VERSION),
-                &self.recipient.to_cbor(),
-                &encode_byte_string(&self.state_mask),
-                &encode_nullable(self.data.as_ref(), |v| encode_byte_string(v)),
-                &encode_uint(timeout),
-            ])
-        } else {
-            encode_array(&[
-                &encode_uint(LEGACY_VERSION),
-                &self.recipient.to_cbor(),
-                &encode_byte_string(&self.state_mask),
-                &encode_nullable(self.data.as_ref(), |v| encode_byte_string(v)),
-            ])
-        };
+        let payload = encode_array(&[
+            &encode_uint(TRANSFER_TRANSACTION_VERSION),
+            &self.recipient.to_cbor(),
+            &encode_byte_string(&self.state_mask),
+            &encode_nullable(self.data.as_ref(), |v| encode_byte_string(v)),
+            &encode_nullable(self.expires_at.as_ref(), |v| encode_uint(*v)),
+        ]);
         encode_tag(TRANSFER_TRANSACTION_TAG, &payload)
     }
 }

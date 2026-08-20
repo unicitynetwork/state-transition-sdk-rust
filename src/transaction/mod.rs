@@ -33,7 +33,7 @@ pub trait Transaction {
     /// admits the request only in a round whose reference time is below this
     /// value. It is part of the transaction encoding, so the transaction hash
     /// commits to it and the unlock script signs it.
-    fn timeout(&self) -> Option<u64>;
+    fn expires_at(&self) -> Option<u64>;
     /// CBOR encoding (tagged).
     fn to_cbor(&self) -> Vec<u8>;
 

@@ -56,29 +56,29 @@ fn e2e_mint_transfer_verify() {
     let alice = Secp256k1Signer::generate().unwrap();
     let bob = Secp256k1Signer::generate().unwrap();
 
-    let token = client::mint_with_timeout(
+    let token = client::mint(
         &aggregator,
         &trust_base,
         trust_base.network_id,
         &SignaturePredicate::new(alice.public_key()),
-        timeout,
         TokenType::random().unwrap(),
         TokenSalt::random().unwrap(),
         None,
         None,
+        Some(timeout),
     )
     .expect("mint");
     token.verify(&trust_base).expect("verify minted token");
 
-    let transferred = client::transfer_with_timeout(
+    let transferred = client::transfer(
         &aggregator,
         &trust_base,
         &token,
         &SignaturePredicate::new(bob.public_key()),
         &alice,
-        timeout,
         StateMask::random().unwrap(),
         None,
+        Some(timeout),
     )
     .expect("transfer");
     transferred

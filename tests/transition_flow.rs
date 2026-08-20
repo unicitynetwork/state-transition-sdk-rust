@@ -9,10 +9,11 @@
 //! byte-for-byte, and reaches the same verification decisions (RSMT v6a,
 //! big-endian bit order).
 //!
-//! The Alice/Bob/Carol tokens use the service-default request profile, which
-//! carries no timeout and needs no client clock. `explicitTimeoutToken` uses
-//! the explicit-timeout profile, so both encodings are covered by the same
-//! cross-SDK vector.
+//! The Alice/Bob/Carol tokens leave the request deadline to the service, so
+//! their `expiresAt` is CBOR null and no client clock is involved.
+//! `explicitTimeoutToken` carries a sender-chosen deadline. Both are the same
+//! wire version with the same element count, so one vector covers the encoding
+//! with and without a value in that slot.
 
 use unicity_token::api::bft::root_trust_base::RootTrustBaseNodeInfo;
 use unicity_token::api::bft::RootTrustBase;
@@ -74,31 +75,31 @@ fn decodes_and_roundtrips_byte_for_byte() {
     }
 }
 
-/// Both request profiles cross the SDK boundary: the default flow carries no
-/// timeout, and the explicit one carries a deadline the round's reference time
+/// Both cases cross the SDK boundary: the default flow carries no deadline,
+/// and the explicit one carries a deadline the round's reference time
 /// is below.
 #[test]
-fn covers_both_request_profiles() {
+fn covers_present_and_absent_deadlines() {
     let tb = trust_base();
 
     let (_, default_token) = token("aliceToken");
-    assert_eq!(default_token.genesis().transaction().timeout(), None);
-    default_token.verify(&tb).expect("default profile verifies");
+    assert_eq!(default_token.genesis().transaction().expires_at(), None);
+    default_token.verify(&tb).expect("absent deadline verifies");
 
     let (_, explicit_token) = token("explicitTimeoutToken");
     let genesis = explicit_token.genesis();
     let timeout = genesis
         .transaction()
-        .timeout()
-        .expect("explicit profile carries a timeout");
+        .expires_at()
+        .expect("explicit deadline is present");
     assert!(
         genesis.reference_time() < timeout,
-        "certified reference time {} must precede the request timeout {timeout}",
+        "certified reference time {} must precede the request deadline {timeout}",
         genesis.reference_time()
     );
     explicit_token
         .verify(&tb)
-        .expect("explicit profile verifies");
+        .expect("explicit deadline verifies");
 }
 
 #[test]
@@ -246,23 +247,14 @@ fn rejects_mismatched_transfer_certification_state() {
         .certification_data
         .as_ref()
         .expect("fixture has certification data");
-    // Rebuild in whichever request profile the fixture used, so only the
-    // substituted source state differs.
-    proof.certification_data = Some(match data.timeout() {
-        None => CertificationData::new(
-            data.lock_script().clone(),
-            sha256(b"unrelated source state"),
-            data.transaction_hash().clone(),
-            data.unlock_script().to_vec(),
-        ),
-        Some(timeout) => CertificationData::new_with_timeout(
-            data.lock_script().clone(),
-            sha256(b"unrelated source state"),
-            data.transaction_hash().clone(),
-            timeout,
-            data.unlock_script().to_vec(),
-        ),
-    });
+    // Rebuild with the same fields, so only the substituted source state differs.
+    proof.certification_data = Some(CertificationData::new(
+        data.lock_script().clone(),
+        sha256(b"unrelated source state"),
+        data.transaction_hash().clone(),
+        data.unlock_script().to_vec(),
+        data.expires_at(),
+    ));
 
     let forged = Token::new(
         token.genesis().clone(),

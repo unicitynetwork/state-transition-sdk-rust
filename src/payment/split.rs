@@ -148,25 +148,11 @@ impl TokenSplit {
         decode_payment_data: PaymentDataDecoder,
         requests: Vec<SplitTokenRequest>,
         burn_state_mask: Option<[u8; 32]>,
+        burn_expires_at: Option<u64>,
     ) -> Result<Split, SplitError> {
         let assets = verify_payment_token(token, trust_base, registry, decode_payment_data)
             .map_err(SplitError::Verification)?;
-        Self::build_split(token, assets, requests, None, burn_state_mask).map_err(SplitError::Build)
-    }
-
-    /// Split a token using an explicit timeout for the burn transaction.
-    pub fn split_with_timeout(
-        token: &Token,
-        trust_base: &RootTrustBase,
-        registry: &MintJustificationRegistry,
-        decode_payment_data: PaymentDataDecoder,
-        requests: Vec<SplitTokenRequest>,
-        burn_timeout: u64,
-        burn_state_mask: Option<[u8; 32]>,
-    ) -> Result<Split, SplitError> {
-        let assets = verify_payment_token(token, trust_base, registry, decode_payment_data)
-            .map_err(SplitError::Verification)?;
-        Self::build_split(token, assets, requests, Some(burn_timeout), burn_state_mask)
+        Self::build_split(token, assets, requests, burn_state_mask, burn_expires_at)
             .map_err(SplitError::Build)
     }
 
@@ -183,6 +169,7 @@ impl TokenSplit {
         decode_payment_data: PaymentDataDecoder,
         requests: Vec<SplitTokenRequest>,
         burn_state_mask: Option<[u8; 32]>,
+        burn_expires_at: Option<u64>,
     ) -> Result<Split, Error> {
         let source_bytes = token
             .genesis()
@@ -190,24 +177,7 @@ impl TokenSplit {
             .data()
             .ok_or(Error::UnexpectedValue("source token has no payment data"))?;
         let assets = decode_payment_data(source_bytes)?;
-        Self::build_split(token, assets, requests, None, burn_state_mask)
-    }
-
-    /// Build a split without source verification and with an explicit burn timeout.
-    pub fn split_unchecked_with_timeout(
-        token: &Token,
-        decode_payment_data: PaymentDataDecoder,
-        requests: Vec<SplitTokenRequest>,
-        burn_timeout: u64,
-        burn_state_mask: Option<[u8; 32]>,
-    ) -> Result<Split, Error> {
-        let source_bytes = token
-            .genesis()
-            .transaction()
-            .data()
-            .ok_or(Error::UnexpectedValue("source token has no payment data"))?;
-        let assets = decode_payment_data(source_bytes)?;
-        Self::build_split(token, assets, requests, Some(burn_timeout), burn_state_mask)
+        Self::build_split(token, assets, requests, burn_state_mask, burn_expires_at)
     }
 
     /// Construct the split from the source token's already-decoded canonical
@@ -217,8 +187,8 @@ impl TokenSplit {
         token: &Token,
         assets: PaymentAssetCollection,
         requests: Vec<SplitTokenRequest>,
-        burn_timeout: Option<u64>,
         burn_state_mask: Option<[u8; 32]>,
+        burn_expires_at: Option<u64>,
     ) -> Result<Split, Error> {
         let network_id = token.genesis().transaction().network_id();
         let source_token_type = token.token_type().clone();
@@ -288,24 +258,14 @@ impl TokenSplit {
         };
         let (source_state_hash, lock_script) = token.latest_state();
         let recipient = burn_predicate.to_encoded();
-        let burn_transaction = if let Some(timeout) = burn_timeout {
-            TransferTransaction::new_with_timeout(
-                source_state_hash,
-                lock_script,
-                recipient,
-                timeout,
-                mask.to_vec(),
-                Some(manifest_bytes.clone()),
-            )
-        } else {
-            TransferTransaction::new(
-                source_state_hash,
-                lock_script,
-                recipient,
-                mask.to_vec(),
-                Some(manifest_bytes.clone()),
-            )
-        };
+        let burn_transaction = TransferTransaction::new(
+            source_state_hash,
+            lock_script,
+            recipient,
+            mask.to_vec(),
+            Some(manifest_bytes.clone()),
+            burn_expires_at,
+        );
 
         // Build each output with its per-asset proofs (canonical output order).
         let mut tokens = Vec::new();

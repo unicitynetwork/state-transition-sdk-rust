@@ -50,12 +50,13 @@ let aggregator = HttpAggregatorClient::new("https://gateway.testnet2.unicity.net
     .with_api_key("sk_…")
     .with_polling(Duration::from_secs(2), 90);
 let token = client::mint(&aggregator, &trust_base, trust_base.network_id,
-    &recipient, token_type, salt, /* data */ None, /* justification */ None)?;
+    &recipient, token_type, salt, /* data */ None, /* justification */ None,
+    /* expires_at */ None)?;
 ```
 
-Use `mint_with_timeout`, `transfer_with_timeout`, or the transaction-level
-`create_with_timeout`/`new_with_timeout` methods when an application needs an explicit Unix-seconds
-deadline.
+`expires_at` is the exclusive request deadline in Unix seconds. Pass `None` to let the Unicity
+Service assign one from consensus time, which requires no local clock; pass `Some(deadline)` when
+the application needs its own. Either way the value is committed by the transaction hash.
 
 The SDK is generic over the `AggregatorClient` trait, so you can plug in any
 transport (or an in-memory one for tests); `HttpAggregatorClient` is the

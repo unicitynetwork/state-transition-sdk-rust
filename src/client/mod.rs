@@ -116,7 +116,10 @@ pub fn certification_data_for(
     CertificationData::from_transaction(transaction, unlock)
 }
 
-/// Mint a new token to `recipient` and return the verified [`Token`].
+/// Mint a new token and return the verified [`Token`].
+///
+/// `expires_at` is the exclusive request deadline in Unix seconds, or `None` to
+/// let the Unicity Service assign one, which requires no local clock.
 #[allow(clippy::too_many_arguments)]
 pub fn mint<A: AggregatorClient>(
     aggregator: &A,
@@ -127,57 +130,7 @@ pub fn mint<A: AggregatorClient>(
     salt: TokenSalt,
     data: Option<Vec<u8>>,
     justification: Option<Vec<u8>>,
-) -> Result<Token, ClientError<A::Error>> {
-    mint_impl(
-        aggregator,
-        trust_base,
-        network,
-        recipient,
-        None,
-        token_type,
-        salt,
-        data,
-        justification,
-    )
-}
-
-/// Mint a new token with an explicit exclusive certification timeout.
-#[allow(clippy::too_many_arguments)]
-pub fn mint_with_timeout<A: AggregatorClient>(
-    aggregator: &A,
-    trust_base: &RootTrustBase,
-    network: NetworkId,
-    recipient: &impl Predicate,
-    timeout: u64,
-    token_type: TokenType,
-    salt: TokenSalt,
-    data: Option<Vec<u8>>,
-    justification: Option<Vec<u8>>,
-) -> Result<Token, ClientError<A::Error>> {
-    mint_impl(
-        aggregator,
-        trust_base,
-        network,
-        recipient,
-        Some(timeout),
-        token_type,
-        salt,
-        data,
-        justification,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn mint_impl<A: AggregatorClient>(
-    aggregator: &A,
-    trust_base: &RootTrustBase,
-    network: NetworkId,
-    recipient: &impl Predicate,
-    timeout: Option<u64>,
-    token_type: TokenType,
-    salt: TokenSalt,
-    data: Option<Vec<u8>>,
-    justification: Option<Vec<u8>>,
+    expires_at: Option<u64>,
 ) -> Result<Token, ClientError<A::Error>> {
     trust_base
         .validate()
@@ -185,20 +138,15 @@ fn mint_impl<A: AggregatorClient>(
     if network != trust_base.network_id {
         return Err(VerificationError::NetworkMismatch.into());
     }
-    let recipient = EncodedPredicate::from_predicate(recipient);
-    let transaction = if let Some(timeout) = timeout {
-        MintTransaction::create_with_timeout(
-            network,
-            recipient,
-            timeout,
-            token_type,
-            salt,
-            data,
-            justification,
-        )?
-    } else {
-        MintTransaction::create(network, recipient, token_type, salt, data, justification)?
-    };
+    let transaction = MintTransaction::create(
+        network,
+        EncodedPredicate::from_predicate(recipient),
+        token_type,
+        salt,
+        data,
+        justification,
+        expires_at,
+    )?;
 
     // The genesis is unlocked by the deterministic minter key for the token id.
     let signer = Minter::signer(transaction.token_id())?;
@@ -221,6 +169,9 @@ fn mint_impl<A: AggregatorClient>(
 
 /// Transfer `token` to `recipient`, authorised by `signer` (the current
 /// owner's key), and return the verified successor [`Token`].
+///
+/// `expires_at` is the exclusive request deadline in Unix seconds, or `None` to
+/// let the Unicity Service assign one, which requires no local clock.
 #[allow(clippy::too_many_arguments)]
 pub fn transfer<A: AggregatorClient>(
     aggregator: &A,
@@ -230,70 +181,20 @@ pub fn transfer<A: AggregatorClient>(
     signer: &impl Signer,
     state_mask: StateMask,
     data: Option<Vec<u8>>,
-) -> Result<Token, ClientError<A::Error>> {
-    transfer_impl(
-        aggregator, trust_base, token, recipient, signer, None, state_mask, data,
-    )
-}
-
-/// Transfer a token with an explicit exclusive certification timeout.
-#[allow(clippy::too_many_arguments)]
-pub fn transfer_with_timeout<A: AggregatorClient>(
-    aggregator: &A,
-    trust_base: &RootTrustBase,
-    token: &Token,
-    recipient: &impl Predicate,
-    signer: &impl Signer,
-    timeout: u64,
-    state_mask: StateMask,
-    data: Option<Vec<u8>>,
-) -> Result<Token, ClientError<A::Error>> {
-    transfer_impl(
-        aggregator,
-        trust_base,
-        token,
-        recipient,
-        signer,
-        Some(timeout),
-        state_mask,
-        data,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn transfer_impl<A: AggregatorClient>(
-    aggregator: &A,
-    trust_base: &RootTrustBase,
-    token: &Token,
-    recipient: &impl Predicate,
-    signer: &impl Signer,
-    timeout: Option<u64>,
-    state_mask: StateMask,
-    data: Option<Vec<u8>>,
+    expires_at: Option<u64>,
 ) -> Result<Token, ClientError<A::Error>> {
     // Reject an untrusted or stale input before causing any aggregator side
     // effect. The successor is verified again below as defense in depth.
     token.verify(trust_base)?;
     let (source_state_hash, lock_script) = token.latest_state();
-    let recipient = EncodedPredicate::from_predicate(recipient);
-    let transaction = if let Some(timeout) = timeout {
-        TransferTransaction::new_with_timeout(
-            source_state_hash,
-            lock_script,
-            recipient,
-            timeout,
-            state_mask.bytes().to_vec(),
-            data,
-        )
-    } else {
-        TransferTransaction::new(
-            source_state_hash,
-            lock_script,
-            recipient,
-            state_mask.bytes().to_vec(),
-            data,
-        )
-    };
+    let transaction = TransferTransaction::new(
+        source_state_hash,
+        lock_script,
+        EncodedPredicate::from_predicate(recipient),
+        state_mask.bytes().to_vec(),
+        data,
+        expires_at,
+    );
 
     let certification_data = certification_data_for(&transaction, signer);
     aggregator
@@ -315,7 +216,7 @@ fn transfer_impl<A: AggregatorClient>(
 mod tests {
     use super::*;
 
-    /// Exclusive certification request timeout used by these tests.
+    /// Exclusive certification request deadline used by these tests.
     const TIMEOUT: u64 = 1755000000;
     use crate::crypto::signature::PublicKey;
     use crate::predicate::builtin::SignaturePredicate;
@@ -372,16 +273,16 @@ mod tests {
         );
 
         // Fetching the proof fails in the mock, so the flow stops there.
-        let err = mint_with_timeout(
+        let err = mint(
             &agg,
             &trust_base,
             NetworkId::MAINNET,
             &recipient,
-            TIMEOUT,
             TokenType::new([0u8; 32]),
             TokenSalt::from_bytes([0u8; 32]),
             None,
             None,
+            Some(TIMEOUT),
         )
         .unwrap_err();
         assert_eq!(err, ClientError::Aggregator("no proof in mock"));

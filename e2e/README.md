@@ -23,8 +23,8 @@ cargo run --release
 The program loads `.env` with `dotenvy`. Values already present in the process
 environment take precedence, which keeps it suitable for CI and deployed
 environments. `.env` is git-ignored and the credential is never written to the
-generated token files. Mint and transfer requests use exclusive timeouts one
-hour ahead of the current Unix time.
+generated token files. Mint and transfer requests set an exclusive
+`expiresAt` deadline one hour ahead of the current Unix time.
 
 Defaults:
 

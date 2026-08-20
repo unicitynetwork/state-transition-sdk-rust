@@ -4,7 +4,9 @@
 
 use alloc::vec::Vec;
 
-use crate::cbor::{encode_array, encode_byte_string, encode_tag, encode_uint, Decoder};
+use crate::cbor::{
+    encode_array, encode_byte_string, encode_nullable, encode_tag, encode_uint, Decoder,
+};
 use crate::crypto::hash::{DataHash, HashAlgorithm};
 use crate::error::Error;
 use crate::predicate::EncodedPredicate;
@@ -12,8 +14,9 @@ use crate::transaction::Transaction;
 
 /// CBOR tag for [`CertificationData`].
 pub const CERTIFICATION_DATA_TAG: u64 = 39031;
-const LEGACY_VERSION: u64 = 1;
-const TIMEOUT_VERSION: u64 = 2;
+/// The only accepted wire version. One version, one element count.
+pub const CERTIFICATION_DATA_VERSION: u64 = 2;
+const FIELD_COUNT: usize = 6;
 
 /// What the aggregator certified for one state transition.
 ///
@@ -25,43 +28,28 @@ pub struct CertificationData {
     lock_script: EncodedPredicate,
     source_state_hash: DataHash,
     transaction_hash: DataHash,
-    timeout: Option<u64>,
+    expires_at: Option<u64>,
     unlock_script: Vec<u8>,
 }
 
 impl CertificationData {
-    /// Construct from parts.
+    /// Construct from parts. `expires_at` is the exclusive request deadline in
+    /// Unix seconds, or `None` to let the Unicity Service assign one, which
+    /// requires no local clock.
     pub fn new(
         lock_script: EncodedPredicate,
         source_state_hash: DataHash,
         transaction_hash: DataHash,
         unlock_script: Vec<u8>,
+        expires_at: Option<u64>,
     ) -> Self {
         CertificationData {
             lock_script,
             source_state_hash,
             transaction_hash,
-            timeout: None,
+            expires_at,
             unlock_script,
         }
-    }
-
-    /// Construct certification data with an explicit exclusive request timeout.
-    pub fn new_with_timeout(
-        lock_script: EncodedPredicate,
-        source_state_hash: DataHash,
-        transaction_hash: DataHash,
-        timeout: u64,
-        unlock_script: Vec<u8>,
-    ) -> Self {
-        let mut data = Self::new(
-            lock_script,
-            source_state_hash,
-            transaction_hash,
-            unlock_script,
-        );
-        data.timeout = Some(timeout);
-        data
     }
 
     /// Build from a transaction and an unlock script, computing the
@@ -71,7 +59,7 @@ impl CertificationData {
             lock_script: transaction.lock_script().clone(),
             source_state_hash: transaction.source_state_hash().clone(),
             transaction_hash: transaction.calculate_transaction_hash(),
-            timeout: transaction.timeout(),
+            expires_at: transaction.expires_at(),
             unlock_script,
         }
     }
@@ -88,9 +76,10 @@ impl CertificationData {
     pub fn transaction_hash(&self) -> &DataHash {
         &self.transaction_hash
     }
-    /// The exclusive timeout of the certification request.
-    pub fn timeout(&self) -> Option<u64> {
-        self.timeout
+    /// The exclusive certification request deadline, or `None` when the Unicity
+    /// Service assigned one.
+    pub fn expires_at(&self) -> Option<u64> {
+        self.expires_at
     }
     /// The unlock script (witness).
     pub fn unlock_script(&self) -> &[u8] {
@@ -99,36 +88,22 @@ impl CertificationData {
 
     /// Encode to CBOR (tagged). Hashes are encoded as their raw 32-byte data.
     pub fn to_cbor(&self) -> Vec<u8> {
-        let payload = if let Some(timeout) = self.timeout {
-            encode_array(&[
-                &encode_uint(TIMEOUT_VERSION),
-                &self.lock_script.to_cbor(),
-                &encode_byte_string(self.source_state_hash.data()),
-                &encode_byte_string(self.transaction_hash.data()),
-                &encode_uint(timeout),
-                &encode_byte_string(&self.unlock_script),
-            ])
-        } else {
-            encode_array(&[
-                &encode_uint(LEGACY_VERSION),
-                &self.lock_script.to_cbor(),
-                &encode_byte_string(self.source_state_hash.data()),
-                &encode_byte_string(self.transaction_hash.data()),
-                &encode_byte_string(&self.unlock_script),
-            ])
-        };
+        let payload = encode_array(&[
+            &encode_uint(CERTIFICATION_DATA_VERSION),
+            &self.lock_script.to_cbor(),
+            &encode_byte_string(self.source_state_hash.data()),
+            &encode_byte_string(self.transaction_hash.data()),
+            &encode_nullable(self.expires_at.as_ref(), |v| encode_uint(*v)),
+            &encode_byte_string(&self.unlock_script),
+        ]);
         encode_tag(CERTIFICATION_DATA_TAG, &payload)
     }
 
     /// Decode from CBOR. The reference SDKs always store SHA-256 hashes here.
     pub fn from_cbor(d: Decoder<'_>) -> Result<Self, Error> {
         let inner = d.expect_tag(CERTIFICATION_DATA_TAG)?;
-        let items = inner.array(None)?;
-        let version = items[0].uint()?;
-        let has_timeout = version == TIMEOUT_VERSION;
-        if (version != LEGACY_VERSION && version != TIMEOUT_VERSION)
-            || items.len() != if has_timeout { 6 } else { 5 }
-        {
+        let items = inner.array(Some(FIELD_COUNT))?;
+        if items[0].uint()? != CERTIFICATION_DATA_VERSION {
             return Err(Error::UnexpectedValue(
                 "unsupported CertificationData version",
             ));
@@ -137,14 +112,8 @@ impl CertificationData {
             lock_script: EncodedPredicate::from_cbor(items[1])?,
             source_state_hash: DataHash::new(HashAlgorithm::Sha256, items[2].bytes_value()?)?,
             transaction_hash: DataHash::new(HashAlgorithm::Sha256, items[3].bytes_value()?)?,
-            timeout: if has_timeout {
-                Some(items[4].uint()?)
-            } else {
-                None
-            },
-            unlock_script: items[if has_timeout { 5 } else { 4 }]
-                .bytes_value()?
-                .to_vec(),
+            expires_at: items[4].nullable(|d| d.uint().map_err(Into::into))?,
+            unlock_script: items[5].bytes_value()?.to_vec(),
         })
     }
 }
@@ -176,14 +145,14 @@ mod tests {
         )
         .to_encoded();
 
-        let mint = MintTransaction::create_with_timeout(
+        let mint = MintTransaction::create(
             NetworkId::MAINNET,
             recipient,
-            TIMEOUT,
             TokenType::new([0u8; 32]),
             TokenSalt::from_bytes([0u8; 32]),
             None,
             None,
+            Some(TIMEOUT),
         )
         .unwrap();
 
@@ -224,6 +193,7 @@ mod tests {
             TokenSalt::from_bytes([0u8; 32]),
             None,
             None,
+            None,
         )
         .unwrap();
         let signer = Minter::signer(mint.token_id()).unwrap();
@@ -231,10 +201,10 @@ mod tests {
         let unlock = sign_signature_unlock(&signer, mint.source_state_hash(), &tx_hash);
         let cert = CertificationData::from_transaction(&mint, unlock);
 
-        assert_eq!(mint.timeout(), None);
-        assert_eq!(cert.timeout(), None);
+        assert_eq!(mint.expires_at(), None);
+        assert_eq!(cert.expires_at(), None);
         assert_eq!(cert.to_cbor(), hex!(
-            "d998778501d9987883014101582103a19eef04b8856f50bf2d688b0d8804575115e53d2a7780da363628343f9635075820e4b183ff6b7a399983cee26e4feea85d517dede0142def5c838e593a9e6152415820df524cffc08a1dc30579a8a51f440a97b30630988084f8d12a4d8bd741c7791258419efb637f14dbdaada6e293e2182932d82265b04b1abf4f28bc4c285b32b5e2325140fe7f94bc9b705c568b4fcb7f9ea90cf0fadcacc1b4504275f81558aad1e700"
+            "d998778602d9987883014101582103a19eef04b8856f50bf2d688b0d8804575115e53d2a7780da363628343f9635075820e4b183ff6b7a399983cee26e4feea85d517dede0142def5c838e593a9e6152415820c034e096d7bdf71ba759558663b5cafb7279ecb7e284443e5e6cbce0461aceeef6584154ca6b19a7dbcae7a6adc38af5c8672f81943ecaf51345436684299b4b7ac81a57db2653f32048981e37913db4749ca08d998d1fac4a52ab5579988bc2c50de900"
         ));
     }
 
