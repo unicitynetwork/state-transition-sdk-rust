@@ -238,8 +238,9 @@ pub fn verify_inclusion_proof_for(
         proof.unicity_certificate.input_record.hash.clone(),
     )
     .map_err(|_| VerificationError::PathInvalid)?;
+    // An absent reference time on the proof also fails this comparison.
     if proof.reference_time != Some(reference_time) {
-        return Err(VerificationError::MissingReferenceTime);
+        return Err(VerificationError::ReferenceTimeMismatch);
     }
     let leaf_value = calculate_leaf_value(certification_data.transaction_hash(), reference_time);
     if !inclusion_certificate.verify(state_id, &leaf_value, &expected_root) {
@@ -785,6 +786,41 @@ mod tests {
             verify_inclusion_proof(&tb, &proof, &transfer, REFERENCE_TIME),
             Err(VerificationError::CertificationDataMismatch)
         );
+    }
+
+    /// A proof either establishes a leaf or reports that there is none yet. The
+    /// aggregators emit all three leaf fields together or none of them, so a
+    /// partially present proof is a protocol violation and is rejected at
+    /// decode rather than surfacing as a None somewhere downstream.
+    #[test]
+    fn rejects_a_partially_present_proof() {
+        let (_tb, _n, _o, _transfer, proof) = transfer_case();
+
+        for partial in [
+            InclusionProof {
+                inclusion_certificate: None,
+                ..proof.clone()
+            },
+            InclusionProof {
+                reference_time: None,
+                ..proof.clone()
+            },
+            InclusionProof {
+                certification_data: None,
+                ..proof.clone()
+            },
+            InclusionProof {
+                certification_data: None,
+                reference_time: None,
+                ..proof.clone()
+            },
+        ] {
+            let bytes = partial.to_cbor();
+            assert!(matches!(
+                InclusionProof::from_cbor(Decoder::new(&bytes)),
+                Err(crate::error::Error::UnexpectedValue(_))
+            ));
+        }
     }
 
     #[test]

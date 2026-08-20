@@ -48,6 +48,19 @@ impl InclusionProof {
         let reference_time = items[2].nullable(|x| x.uint().map_err(Into::into))?;
         let inclusion_certificate =
             items[3].nullable(|x| InclusionCertificate::decode(x.bytes_value()?))?;
+
+        // A proof either establishes a leaf or reports that there is none yet. A
+        // partially present proof is neither, and would let a caller reach a leaf
+        // check with a reference time nothing certified.
+        let present = certification_data.is_some() as u8
+            + reference_time.is_some() as u8
+            + inclusion_certificate.is_some() as u8;
+        if present != 0 && present != 3 {
+            return Err(Error::UnexpectedValue(
+                "InclusionProof must carry certification data, reference time and inclusion certificate together, or none of them",
+            ));
+        }
+
         Ok(InclusionProof {
             certification_data,
             reference_time,
