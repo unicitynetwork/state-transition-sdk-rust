@@ -16,7 +16,8 @@ use crate::predicate::EncodedPredicate;
 
 /// CBOR tag for [`MintTransaction`].
 pub const MINT_TRANSACTION_TAG: u64 = 39041;
-const VERSION: u64 = 1;
+const LEGACY_VERSION: u64 = 1;
+const TIMEOUT_VERSION: u64 = 2;
 
 /// A token mint transaction. The lock script, source (mint) state, and token id
 /// are *derived* from the network id and salt — never taken from the wire — so
@@ -25,7 +26,7 @@ const VERSION: u64 = 1;
 pub struct MintTransaction {
     network_id: NetworkId,
     recipient: EncodedPredicate,
-    timeout: u64,
+    timeout: Option<u64>,
     salt: TokenSalt,
     token_type: TokenType,
     justification: Option<Vec<u8>>,
@@ -42,7 +43,6 @@ impl MintTransaction {
     pub fn create(
         network_id: NetworkId,
         recipient: EncodedPredicate,
-        timeout: u64,
         token_type: TokenType,
         salt: TokenSalt,
         data: Option<Vec<u8>>,
@@ -54,7 +54,7 @@ impl MintTransaction {
         Ok(MintTransaction {
             network_id,
             recipient,
-            timeout,
+            timeout: None,
             salt,
             token_type,
             justification,
@@ -63,6 +63,22 @@ impl MintTransaction {
             lock_script,
             source_state,
         })
+    }
+
+    /// Build a mint transaction with an explicit exclusive request timeout.
+    pub fn create_with_timeout(
+        network_id: NetworkId,
+        recipient: EncodedPredicate,
+        timeout: u64,
+        token_type: TokenType,
+        salt: TokenSalt,
+        data: Option<Vec<u8>>,
+        justification: Option<Vec<u8>>,
+    ) -> Result<Self, Error> {
+        let mut transaction =
+            Self::create(network_id, recipient, token_type, salt, data, justification)?;
+        transaction.timeout = Some(timeout);
+        Ok(transaction)
     }
 
     /// The network id.
@@ -93,9 +109,12 @@ impl MintTransaction {
     /// Decode from CBOR (tagged), re-deriving the lock script / mint state.
     pub fn from_cbor(d: Decoder<'_>) -> Result<Self, Error> {
         let inner = d.expect_tag(MINT_TRANSACTION_TAG)?;
-        let items = inner.array(Some(8))?;
+        let items = inner.array(None)?;
         let version = items[0].uint()?;
-        if version != VERSION {
+        let has_timeout = version == TIMEOUT_VERSION;
+        if (version != LEGACY_VERSION && version != TIMEOUT_VERSION)
+            || items.len() != if has_timeout { 8 } else { 7 }
+        {
             return Err(Error::UnexpectedValue(
                 "unsupported MintTransaction version",
             ));
@@ -111,16 +130,19 @@ impl MintTransaction {
             items[5].nullable(|d| d.bytes_value().map(|b| b.to_vec()).map_err(Into::into))?;
         let data =
             items[6].nullable(|d| d.bytes_value().map(|b| b.to_vec()).map_err(Into::into))?;
-        let timeout = items[7].uint()?;
-        MintTransaction::create(
-            network_id,
-            recipient,
-            timeout,
-            token_type,
-            salt,
-            data,
-            justification,
-        )
+        if has_timeout {
+            MintTransaction::create_with_timeout(
+                network_id,
+                recipient,
+                items[7].uint()?,
+                token_type,
+                salt,
+                data,
+                justification,
+            )
+        } else {
+            MintTransaction::create(network_id, recipient, token_type, salt, data, justification)
+        }
     }
 }
 
@@ -137,7 +159,7 @@ impl Transaction for MintTransaction {
         self.source_state.hash()
     }
 
-    fn timeout(&self) -> u64 {
+    fn timeout(&self) -> Option<u64> {
         self.timeout
     }
 
@@ -150,18 +172,36 @@ impl Transaction for MintTransaction {
     }
 
     fn to_cbor(&self) -> Vec<u8> {
-        encode_tag(
-            MINT_TRANSACTION_TAG,
-            &encode_array(&[
-                &encode_uint(VERSION),
-                &encode_uint(self.network_id.id() as u64),
-                &self.recipient.to_cbor(),
-                &self.salt.to_cbor(),
-                &self.token_type.to_cbor(),
-                &encode_nullable(self.justification.as_ref(), |v| encode_byte_string(v)),
-                &encode_nullable(self.data.as_ref(), |v| encode_byte_string(v)),
-                &encode_uint(self.timeout),
-            ]),
-        )
+        let common = [
+            &encode_uint(self.network_id.id() as u64),
+            &self.recipient.to_cbor(),
+            &self.salt.to_cbor(),
+            &self.token_type.to_cbor(),
+            &encode_nullable(self.justification.as_ref(), |v| encode_byte_string(v)),
+            &encode_nullable(self.data.as_ref(), |v| encode_byte_string(v)),
+        ];
+        let payload = if let Some(timeout) = self.timeout {
+            encode_array(&[
+                &encode_uint(TIMEOUT_VERSION),
+                common[0],
+                common[1],
+                common[2],
+                common[3],
+                common[4],
+                common[5],
+                &encode_uint(timeout),
+            ])
+        } else {
+            encode_array(&[
+                &encode_uint(LEGACY_VERSION),
+                common[0],
+                common[1],
+                common[2],
+                common[3],
+                common[4],
+                common[5],
+            ])
+        };
+        encode_tag(MINT_TRANSACTION_TAG, &payload)
     }
 }

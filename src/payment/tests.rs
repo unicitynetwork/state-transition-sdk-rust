@@ -134,11 +134,11 @@ fn valid_proof(
     let state_id = StateId::derive(transaction.lock_script(), transaction.source_state_hash());
     let root = leaf_root(&state_id, &calculate_leaf_value(&tx_hash, REFERENCE_TIME));
     let unlock = sign_signature_unlock(owner, transaction.source_state_hash(), &tx_hash);
-    let certification_data = CertificationData::new(
+    let certification_data = CertificationData::new_with_timeout(
         transaction.lock_script().clone(),
         transaction.source_state_hash().clone(),
         tx_hash,
-        transaction.timeout(),
+        transaction.timeout().expect("explicit timeout fixture"),
         unlock,
     );
     InclusionProof {
@@ -171,7 +171,7 @@ fn source_token(node: &Secp256k1Signer, owner: &Secp256k1Signer) -> Token {
         Asset::new(asset_b(), BigUint::from(50u32)),
     ])
     .unwrap();
-    let mint = MintTransaction::create(
+    let mint = MintTransaction::create_with_timeout(
         NetworkId::LOCAL,
         sig_pred(owner),
         TIMEOUT,
@@ -183,10 +183,7 @@ fn source_token(node: &Secp256k1Signer, owner: &Secp256k1Signer) -> Token {
     .unwrap();
     let minter = Minter::signer(mint.token_id()).unwrap();
     let proof = valid_proof(&mint, &minter, node);
-    Token::new(
-        CertifiedMintTransaction::new(mint, REFERENCE_TIME, proof),
-        Vec::new(),
-    )
+    Token::new(CertifiedMintTransaction::new(mint, proof), Vec::new())
 }
 
 /// Wrap a burn transfer into a certified, burned source token.
@@ -199,11 +196,7 @@ fn burned_token(
     let proof = valid_proof(&burn_tx, owner, node);
     Token::new(
         source.genesis().clone(),
-        vec![CertifiedTransferTransaction::new(
-            burn_tx,
-            REFERENCE_TIME,
-            proof,
-        )],
+        vec![CertifiedTransferTransaction::new(burn_tx, proof)],
     )
 }
 
@@ -217,7 +210,7 @@ fn mint_output(
     justification: &SplitMintJustification,
     node: &Secp256k1Signer,
 ) -> Token {
-    let mint = MintTransaction::create(
+    let mint = MintTransaction::create_with_timeout(
         network,
         recipient,
         TIMEOUT,
@@ -229,10 +222,7 @@ fn mint_output(
     .unwrap();
     let minter = Minter::signer(mint.token_id()).unwrap();
     let proof = valid_proof(&mint, &minter, node);
-    Token::new(
-        CertifiedMintTransaction::new(mint, REFERENCE_TIME, proof),
-        Vec::new(),
-    )
+    Token::new(CertifiedMintTransaction::new(mint, proof), Vec::new())
 }
 
 fn registry() -> MintJustificationRegistry {
@@ -336,7 +326,7 @@ fn forged_output_with_type(
     let manifest = SplitManifest::create(vec![built.root_hash(), [0u8; 32]]).unwrap();
     let burn_predicate = BurnPredicate::new(manifest.reason_hash().to_vec());
     let (source_state_hash, lock_script) = s.source.latest_state();
-    let burn = TransferTransaction::new(
+    let burn = TransferTransaction::new_with_timeout(
         source_state_hash,
         lock_script,
         burn_predicate.to_encoded(),
@@ -376,7 +366,7 @@ fn split_outputs_verify_end_to_end() {
         2
     );
 
-    let split = TokenSplit::split(
+    let split = TokenSplit::split_with_timeout(
         &s.source,
         &s.tb,
         &registry,
@@ -463,7 +453,7 @@ fn payment_verification_enforces_issuance_policy() {
 #[test]
 fn recursive_split_verification_honors_shared_depth_limit() {
     let s = scenario();
-    let split = TokenSplit::split(
+    let split = TokenSplit::split_with_timeout(
         &s.source,
         &s.tb,
         &registry(),
@@ -527,7 +517,7 @@ fn rejects_asset_absent_from_burned_source() {
 #[test]
 fn rejects_tampered_output_amount() {
     let s = scenario();
-    let split = TokenSplit::split(
+    let split = TokenSplit::split_with_timeout(
         &s.source,
         &s.tb,
         &registry(),
@@ -566,7 +556,7 @@ fn rejects_tampered_output_amount() {
 #[test]
 fn rejects_dropped_proof() {
     let s = scenario();
-    let split = TokenSplit::split(
+    let split = TokenSplit::split_with_timeout(
         &s.source,
         &s.tb,
         &registry(),
@@ -601,7 +591,7 @@ fn rejects_dropped_proof() {
 #[test]
 fn rejects_wrong_burn_predicate() {
     let s = scenario();
-    let split = TokenSplit::split(
+    let split = TokenSplit::split_with_timeout(
         &s.source,
         &s.tb,
         &registry(),
@@ -616,7 +606,7 @@ fn rejects_wrong_burn_predicate() {
     // Burn the source carrying the real manifest, but locked to an unrelated burn
     // predicate (not SHA-256 of the manifest).
     let (source_state_hash, lock_script) = s.source.latest_state();
-    let wrong_burn = TransferTransaction::new(
+    let wrong_burn = TransferTransaction::new_with_timeout(
         source_state_hash,
         lock_script,
         BurnPredicate::new(b"not-the-manifest-hash".to_vec()).to_encoded(),
@@ -663,7 +653,7 @@ fn rejects_output_token_type_mismatch_at_verify() {
 #[test]
 fn rejects_missing_manifest() {
     let s = scenario();
-    let split = TokenSplit::split(
+    let split = TokenSplit::split_with_timeout(
         &s.source,
         &s.tb,
         &registry(),
@@ -675,7 +665,7 @@ fn rejects_missing_manifest() {
     .unwrap();
     // Burn with no auxiliary manifest data at all.
     let (source_state_hash, lock_script) = s.source.latest_state();
-    let burn = TransferTransaction::new(
+    let burn = TransferTransaction::new_with_timeout(
         source_state_hash,
         lock_script,
         BurnPredicate::new(b"x".to_vec()).to_encoded(),
@@ -704,7 +694,7 @@ fn rejects_missing_manifest() {
 #[test]
 fn rejects_manifest_length_mismatch() {
     let s = scenario();
-    let split = TokenSplit::split(
+    let split = TokenSplit::split_with_timeout(
         &s.source,
         &s.tb,
         &registry(),
@@ -718,7 +708,7 @@ fn rejects_manifest_length_mismatch() {
     // carries two assets.
     let short = SplitManifest::create(vec![[0u8; 32]]).unwrap();
     let (source_state_hash, lock_script) = s.source.latest_state();
-    let burn = TransferTransaction::new(
+    let burn = TransferTransaction::new_with_timeout(
         source_state_hash,
         lock_script,
         BurnPredicate::new(short.reason_hash().to_vec()).to_encoded(),
@@ -759,7 +749,7 @@ fn rejects_wrong_output_token_type() {
         TokenType::new(vec![0xC9; 32]),
         TokenSalt::from_bytes([0x10; 32]),
     )];
-    assert!(TokenSplit::split_unchecked(
+    assert!(TokenSplit::split_unchecked_with_timeout(
         &s.source,
         PaymentAssetCollection::from_cbor_bytes,
         bad,
@@ -784,7 +774,7 @@ fn rejects_unbalanced_split_at_build_time() {
         coin_type(),
         TokenSalt::from_bytes([0x10; 32]),
     )];
-    assert!(TokenSplit::split_unchecked(
+    assert!(TokenSplit::split_unchecked_with_timeout(
         &s.source,
         PaymentAssetCollection::from_cbor_bytes,
         bad,

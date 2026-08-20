@@ -18,7 +18,8 @@ use crate::predicate::EncodedPredicate;
 
 /// CBOR tag for [`TransferTransaction`].
 pub const TRANSFER_TRANSACTION_TAG: u64 = 39045;
-const VERSION: u64 = 1;
+const LEGACY_VERSION: u64 = 1;
+const TIMEOUT_VERSION: u64 = 2;
 
 /// A token transfer transaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,7 +29,7 @@ pub struct TransferTransaction {
     lock_script: EncodedPredicate,
     // On the wire:
     recipient: EncodedPredicate,
-    timeout: u64,
+    timeout: Option<u64>,
     state_mask: Vec<u8>,
     data: Option<Vec<u8>>,
 }
@@ -41,7 +42,6 @@ impl TransferTransaction {
         source_state_hash: DataHash,
         lock_script: EncodedPredicate,
         recipient: EncodedPredicate,
-        timeout: u64,
         state_mask: Vec<u8>,
         data: Option<Vec<u8>>,
     ) -> Self {
@@ -49,10 +49,25 @@ impl TransferTransaction {
             source_state_hash,
             lock_script,
             recipient,
-            timeout,
+            timeout: None,
             state_mask,
             data,
         }
+    }
+
+    /// Construct a transfer with an explicit exclusive request timeout.
+    pub fn new_with_timeout(
+        source_state_hash: DataHash,
+        lock_script: EncodedPredicate,
+        recipient: EncodedPredicate,
+        timeout: u64,
+        state_mask: Vec<u8>,
+        data: Option<Vec<u8>>,
+    ) -> Self {
+        let mut transaction =
+            Self::new(source_state_hash, lock_script, recipient, state_mask, data);
+        transaction.timeout = Some(timeout);
+        transaction
     }
 
     /// The state mask mixed into the resulting state hash.
@@ -73,9 +88,12 @@ impl TransferTransaction {
         lock_script: EncodedPredicate,
     ) -> Result<Self, Error> {
         let inner = d.expect_tag(TRANSFER_TRANSACTION_TAG)?;
-        let items = inner.array(Some(5))?;
+        let items = inner.array(None)?;
         let version = items[0].uint()?;
-        if version != VERSION {
+        let has_timeout = version == TIMEOUT_VERSION;
+        if (version != LEGACY_VERSION && version != TIMEOUT_VERSION)
+            || items.len() != if has_timeout { 5 } else { 4 }
+        {
             return Err(Error::UnexpectedValue(
                 "unsupported TransferTransaction version",
             ));
@@ -84,15 +102,18 @@ impl TransferTransaction {
         let state_mask = items[2].bytes_value()?.to_vec();
         let data =
             items[3].nullable(|d| d.bytes_value().map(|b| b.to_vec()).map_err(Into::into))?;
-        let timeout = items[4].uint()?;
-        Ok(TransferTransaction::new(
-            source_state_hash,
-            lock_script,
-            recipient,
-            timeout,
-            state_mask,
-            data,
-        ))
+        Ok(if has_timeout {
+            TransferTransaction::new_with_timeout(
+                source_state_hash,
+                lock_script,
+                recipient,
+                items[4].uint()?,
+                state_mask,
+                data,
+            )
+        } else {
+            TransferTransaction::new(source_state_hash, lock_script, recipient, state_mask, data)
+        })
     }
 }
 
@@ -109,7 +130,7 @@ impl Transaction for TransferTransaction {
         &self.source_state_hash
     }
 
-    fn timeout(&self) -> u64 {
+    fn timeout(&self) -> Option<u64> {
         self.timeout
     }
 
@@ -121,15 +142,22 @@ impl Transaction for TransferTransaction {
     }
 
     fn to_cbor(&self) -> Vec<u8> {
-        encode_tag(
-            TRANSFER_TRANSACTION_TAG,
-            &encode_array(&[
-                &encode_uint(VERSION),
+        let payload = if let Some(timeout) = self.timeout {
+            encode_array(&[
+                &encode_uint(TIMEOUT_VERSION),
                 &self.recipient.to_cbor(),
                 &encode_byte_string(&self.state_mask),
                 &encode_nullable(self.data.as_ref(), |v| encode_byte_string(v)),
-                &encode_uint(self.timeout),
-            ]),
-        )
+                &encode_uint(timeout),
+            ])
+        } else {
+            encode_array(&[
+                &encode_uint(LEGACY_VERSION),
+                &self.recipient.to_cbor(),
+                &encode_byte_string(&self.state_mask),
+                &encode_nullable(self.data.as_ref(), |v| encode_byte_string(v)),
+            ])
+        };
+        encode_tag(TRANSFER_TRANSACTION_TAG, &payload)
     }
 }

@@ -1,7 +1,7 @@
 //! Certified transactions: a transaction bundled with its inclusion proof.
 //!
-//! These wrap [`MintTransaction`] / [`TransferTransaction`] and are *not* tagged
-//! — on the wire each is a 3-element array
+//! These wrap [`MintTransaction`] / [`TransferTransaction`] and are *not* tagged.
+//! On the wire each value is a 3-element array
 //! `[transaction, referenceTime, inclusionProof]`.
 //!
 //! The reference time is fixed when the transaction is first bound to a proof
@@ -28,11 +28,8 @@ pub struct CertifiedMintTransaction {
 impl CertifiedMintTransaction {
     /// Bundle a transaction with a proof (no verification — see
     /// [`Token::verify`](super::token::Token::verify)).
-    pub fn new(
-        transaction: MintTransaction,
-        reference_time: u64,
-        inclusion_proof: InclusionProof,
-    ) -> Self {
+    pub fn new(transaction: MintTransaction, inclusion_proof: InclusionProof) -> Self {
+        let reference_time = inclusion_proof.reference_time.unwrap_or(0);
         CertifiedMintTransaction {
             transaction,
             reference_time,
@@ -64,10 +61,17 @@ impl CertifiedMintTransaction {
     /// Decode from CBOR (3-element array).
     pub fn from_cbor(d: Decoder<'_>) -> Result<Self, Error> {
         let items = d.array(Some(3))?;
+        let reference_time = items[1].uint()?;
+        let inclusion_proof = InclusionProof::from_cbor(items[2])?;
+        if inclusion_proof.reference_time != Some(reference_time) {
+            return Err(Error::UnexpectedValue(
+                "certified mint reference time mismatch",
+            ));
+        }
         Ok(CertifiedMintTransaction {
             transaction: MintTransaction::from_cbor(items[0])?,
-            reference_time: items[1].uint()?,
-            inclusion_proof: InclusionProof::from_cbor(items[2])?,
+            reference_time,
+            inclusion_proof,
         })
     }
 
@@ -91,11 +95,8 @@ pub struct CertifiedTransferTransaction {
 
 impl CertifiedTransferTransaction {
     /// Bundle a transaction with a proof (no verification).
-    pub fn new(
-        transaction: TransferTransaction,
-        reference_time: u64,
-        inclusion_proof: InclusionProof,
-    ) -> Self {
+    pub fn new(transaction: TransferTransaction, inclusion_proof: InclusionProof) -> Self {
+        let reference_time = inclusion_proof.reference_time.unwrap_or(0);
         CertifiedTransferTransaction {
             transaction,
             reference_time,
@@ -132,10 +133,17 @@ impl CertifiedTransferTransaction {
         lock_script: EncodedPredicate,
     ) -> Result<Self, Error> {
         let items = d.array(Some(3))?;
+        let reference_time = items[1].uint()?;
+        let inclusion_proof = InclusionProof::from_cbor(items[2])?;
+        if inclusion_proof.reference_time != Some(reference_time) {
+            return Err(Error::UnexpectedValue(
+                "certified transfer reference time mismatch",
+            ));
+        }
         Ok(CertifiedTransferTransaction {
             transaction: TransferTransaction::from_cbor(items[0], source_state_hash, lock_script)?,
-            reference_time: items[1].uint()?,
-            inclusion_proof: InclusionProof::from_cbor(items[2])?,
+            reference_time,
+            inclusion_proof,
         })
     }
 

@@ -123,7 +123,57 @@ pub fn mint<A: AggregatorClient>(
     trust_base: &RootTrustBase,
     network: NetworkId,
     recipient: &impl Predicate,
+    token_type: TokenType,
+    salt: TokenSalt,
+    data: Option<Vec<u8>>,
+    justification: Option<Vec<u8>>,
+) -> Result<Token, ClientError<A::Error>> {
+    mint_impl(
+        aggregator,
+        trust_base,
+        network,
+        recipient,
+        None,
+        token_type,
+        salt,
+        data,
+        justification,
+    )
+}
+
+/// Mint a new token with an explicit exclusive certification timeout.
+#[allow(clippy::too_many_arguments)]
+pub fn mint_with_timeout<A: AggregatorClient>(
+    aggregator: &A,
+    trust_base: &RootTrustBase,
+    network: NetworkId,
+    recipient: &impl Predicate,
     timeout: u64,
+    token_type: TokenType,
+    salt: TokenSalt,
+    data: Option<Vec<u8>>,
+    justification: Option<Vec<u8>>,
+) -> Result<Token, ClientError<A::Error>> {
+    mint_impl(
+        aggregator,
+        trust_base,
+        network,
+        recipient,
+        Some(timeout),
+        token_type,
+        salt,
+        data,
+        justification,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn mint_impl<A: AggregatorClient>(
+    aggregator: &A,
+    trust_base: &RootTrustBase,
+    network: NetworkId,
+    recipient: &impl Predicate,
+    timeout: Option<u64>,
     token_type: TokenType,
     salt: TokenSalt,
     data: Option<Vec<u8>>,
@@ -135,15 +185,20 @@ pub fn mint<A: AggregatorClient>(
     if network != trust_base.network_id {
         return Err(VerificationError::NetworkMismatch.into());
     }
-    let transaction = MintTransaction::create(
-        network,
-        EncodedPredicate::from_predicate(recipient),
-        timeout,
-        token_type,
-        salt,
-        data,
-        justification,
-    )?;
+    let recipient = EncodedPredicate::from_predicate(recipient);
+    let transaction = if let Some(timeout) = timeout {
+        MintTransaction::create_with_timeout(
+            network,
+            recipient,
+            timeout,
+            token_type,
+            salt,
+            data,
+            justification,
+        )?
+    } else {
+        MintTransaction::create(network, recipient, token_type, salt, data, justification)?
+    };
 
     // The genesis is unlocked by the deterministic minter key for the token id.
     let signer = Minter::signer(transaction.token_id())?;
@@ -156,14 +211,8 @@ pub fn mint<A: AggregatorClient>(
     let proof = aggregator
         .get_inclusion_proof(&state_id)
         .map_err(ClientError::Aggregator)?;
-    // Fix the reference time now, from the proof that first establishes the
-    // leaf; a proof fetched later is issued against a later root.
-    let reference_time = proof
-        .reference_time
-        .ok_or(ClientError::Verification(VerificationError::PathInvalid))?;
-
     let token = Token::new(
-        CertifiedMintTransaction::new(transaction, reference_time, proof),
+        CertifiedMintTransaction::new(transaction, proof),
         Vec::new(),
     );
     token.verify(trust_base)?;
@@ -179,7 +228,46 @@ pub fn transfer<A: AggregatorClient>(
     token: &Token,
     recipient: &impl Predicate,
     signer: &impl Signer,
+    state_mask: StateMask,
+    data: Option<Vec<u8>>,
+) -> Result<Token, ClientError<A::Error>> {
+    transfer_impl(
+        aggregator, trust_base, token, recipient, signer, None, state_mask, data,
+    )
+}
+
+/// Transfer a token with an explicit exclusive certification timeout.
+#[allow(clippy::too_many_arguments)]
+pub fn transfer_with_timeout<A: AggregatorClient>(
+    aggregator: &A,
+    trust_base: &RootTrustBase,
+    token: &Token,
+    recipient: &impl Predicate,
+    signer: &impl Signer,
     timeout: u64,
+    state_mask: StateMask,
+    data: Option<Vec<u8>>,
+) -> Result<Token, ClientError<A::Error>> {
+    transfer_impl(
+        aggregator,
+        trust_base,
+        token,
+        recipient,
+        signer,
+        Some(timeout),
+        state_mask,
+        data,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn transfer_impl<A: AggregatorClient>(
+    aggregator: &A,
+    trust_base: &RootTrustBase,
+    token: &Token,
+    recipient: &impl Predicate,
+    signer: &impl Signer,
+    timeout: Option<u64>,
     state_mask: StateMask,
     data: Option<Vec<u8>>,
 ) -> Result<Token, ClientError<A::Error>> {
@@ -187,14 +275,25 @@ pub fn transfer<A: AggregatorClient>(
     // effect. The successor is verified again below as defense in depth.
     token.verify(trust_base)?;
     let (source_state_hash, lock_script) = token.latest_state();
-    let transaction = TransferTransaction::new(
-        source_state_hash,
-        lock_script,
-        EncodedPredicate::from_predicate(recipient),
-        timeout,
-        state_mask.bytes().to_vec(),
-        data,
-    );
+    let recipient = EncodedPredicate::from_predicate(recipient);
+    let transaction = if let Some(timeout) = timeout {
+        TransferTransaction::new_with_timeout(
+            source_state_hash,
+            lock_script,
+            recipient,
+            timeout,
+            state_mask.bytes().to_vec(),
+            data,
+        )
+    } else {
+        TransferTransaction::new(
+            source_state_hash,
+            lock_script,
+            recipient,
+            state_mask.bytes().to_vec(),
+            data,
+        )
+    };
 
     let certification_data = certification_data_for(&transaction, signer);
     aggregator
@@ -205,16 +304,8 @@ pub fn transfer<A: AggregatorClient>(
     let proof = aggregator
         .get_inclusion_proof(&state_id)
         .map_err(ClientError::Aggregator)?;
-    let reference_time = proof
-        .reference_time
-        .ok_or(ClientError::Verification(VerificationError::PathInvalid))?;
-
     let mut transactions = token.transactions().to_vec();
-    transactions.push(CertifiedTransferTransaction::new(
-        transaction,
-        reference_time,
-        proof,
-    ));
+    transactions.push(CertifiedTransferTransaction::new(transaction, proof));
     let next = Token::new(token.genesis().clone(), transactions);
     next.verify(trust_base)?;
     Ok(next)
@@ -281,7 +372,7 @@ mod tests {
         );
 
         // Fetching the proof fails in the mock, so the flow stops there.
-        let err = mint(
+        let err = mint_with_timeout(
             &agg,
             &trust_base,
             NetworkId::MAINNET,
@@ -299,7 +390,7 @@ mod tests {
         assert_eq!(
             captured,
             hex!(
-                "d998778601d9987883014101582103a19eef04b8856f50bf2d688b0d8804575115e53d2a7780da363628343f9635075820e4b183ff6b7a399983cee26e4feea85d517dede0142def5c838e593a9e615241582068a39b55a025f3fc4ff80be2ee8231dbe02afe151279b19fc457d39a6281720b1a689b2cc05841ded0fa3fa2773d2e52d4db8918f883e50be7cdcd351b16bbded03bb2c54f80c130cb08befdfe0f6c78c2e925645f3804953ad41d6f043e9ab8aa81740cbd8f8800"
+                "d998778602d9987883014101582103a19eef04b8856f50bf2d688b0d8804575115e53d2a7780da363628343f9635075820e4b183ff6b7a399983cee26e4feea85d517dede0142def5c838e593a9e6152415820ed275ff0a0694d1b61ec22f13914a431569220ba7f2f043d7940aac78d02c2f91a689b2cc0584111f0f7929d70e0e32db9159b7e23b6e0043502bc36609728e9dc0353251c241a7b1adb047c9234cd77ed519c409048a6c8bc247f0262c1f161b03d6fee49426e00"
             )
         );
     }

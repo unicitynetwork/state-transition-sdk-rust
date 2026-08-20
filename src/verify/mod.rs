@@ -230,8 +230,10 @@ pub fn verify_inclusion_proof_for(
     }
 
     // The request was admissible only in a round strictly before its timeout.
-    if reference_time >= certification_data.timeout() {
-        return Err(VerificationError::RequestExpired);
+    if let Some(timeout) = certification_data.timeout() {
+        if reference_time >= timeout {
+            return Err(VerificationError::RequestExpired);
+        }
     }
 
     let expected_root = DataHash::new(
@@ -239,6 +241,9 @@ pub fn verify_inclusion_proof_for(
         proof.unicity_certificate.input_record.hash.clone(),
     )
     .map_err(|_| VerificationError::PathInvalid)?;
+    if proof.reference_time != Some(reference_time) {
+        return Err(VerificationError::MissingReferenceTime);
+    }
     let leaf_value = calculate_leaf_value(certification_data.transaction_hash(), reference_time);
     if !inclusion_certificate.verify(state_id, &leaf_value, &expected_root) {
         return Err(VerificationError::PathInvalid);
@@ -536,11 +541,11 @@ mod tests {
         let state_id = StateId::derive(transaction.lock_script(), transaction.source_state_hash());
         let root = leaf_root(&state_id, &calculate_leaf_value(&tx_hash, REFERENCE_TIME));
         let unlock = sign_signature_unlock(owner, transaction.source_state_hash(), &tx_hash);
-        let certification_data = CertificationData::new(
+        let certification_data = CertificationData::new_with_timeout(
             transaction.lock_script().clone(),
             transaction.source_state_hash().clone(),
             tx_hash,
-            transaction.timeout(),
+            transaction.timeout().expect("explicit timeout fixture"),
             unlock,
         );
         InclusionProof {
@@ -552,7 +557,7 @@ mod tests {
     }
 
     fn make_transfer(owner: &Secp256k1Signer, recipient: &Secp256k1Signer) -> TransferTransaction {
-        TransferTransaction::new(
+        TransferTransaction::new_with_timeout(
             sha256(b"source-state"),
             SignaturePredicate::new(owner.public_key()).to_encoded(),
             SignaturePredicate::new(recipient.public_key()).to_encoded(),
@@ -738,7 +743,7 @@ mod tests {
         let (tb, _n, _o, transfer, mut proof) = transfer_case();
         let stranger = signer(0xAB);
         let c = cert(&proof);
-        proof.certification_data = Some(CertificationData::new(
+        proof.certification_data = Some(CertificationData::new_with_timeout(
             SignaturePredicate::new(stranger.public_key()).to_encoded(), // wrong lock
             c.source_state_hash().clone(),
             c.transaction_hash().clone(),
@@ -755,7 +760,7 @@ mod tests {
     fn rule_certification_data_mismatch_source_state() {
         let (tb, _n, _o, transfer, mut proof) = transfer_case();
         let c = cert(&proof);
-        proof.certification_data = Some(CertificationData::new(
+        proof.certification_data = Some(CertificationData::new_with_timeout(
             c.lock_script().clone(),
             sha256(b"a-different-source-state"), // wrong source
             c.transaction_hash().clone(),
@@ -772,7 +777,7 @@ mod tests {
     fn rule_certification_data_mismatch_timeout() {
         let (tb, _n, _o, transfer, mut proof) = transfer_case();
         let c = cert(&proof);
-        proof.certification_data = Some(CertificationData::new(
+        proof.certification_data = Some(CertificationData::new_with_timeout(
             c.lock_script().clone(),
             c.source_state_hash().clone(),
             c.transaction_hash().clone(),
@@ -798,7 +803,7 @@ mod tests {
     fn rule_transaction_hash_mismatch() {
         let (tb, _n, _o, transfer, mut proof) = transfer_case();
         let c = cert(&proof);
-        proof.certification_data = Some(CertificationData::new(
+        proof.certification_data = Some(CertificationData::new_with_timeout(
             c.lock_script().clone(),
             c.source_state_hash().clone(),
             sha256(b"not-the-tx-hash"), // wrong tx hash
@@ -884,7 +889,7 @@ mod tests {
         let c = cert(&proof);
         let mut unlock = c.unlock_script().to_vec();
         unlock[0] ^= 0xff; // corrupt the signature (still 65 bytes)
-        proof.certification_data = Some(CertificationData::new(
+        proof.certification_data = Some(CertificationData::new_with_timeout(
             c.lock_script().clone(),
             c.source_state_hash().clone(),
             c.transaction_hash().clone(),
@@ -917,7 +922,7 @@ mod tests {
         justification: Option<Vec<u8>>,
     ) -> (RootTrustBase, MintTransaction, InclusionProof) {
         let recipient = signer(0x55);
-        let mint = MintTransaction::create(
+        let mint = MintTransaction::create_with_timeout(
             NetworkId::LOCAL,
             SignaturePredicate::new(recipient.public_key()).to_encoded(),
             TIMEOUT,
@@ -936,10 +941,7 @@ mod tests {
     fn baseline_genesis_token_verifies() {
         let node = signer(0x11);
         let (tb, mint, proof) = genesis_token(&node, None);
-        let token = Token::new(
-            CertifiedMintTransaction::new(mint, REFERENCE_TIME, proof),
-            Vec::new(),
-        );
+        let token = Token::new(CertifiedMintTransaction::new(mint, proof), Vec::new());
         assert_eq!(token.verify(&tb), Ok(()));
     }
 
@@ -947,10 +949,7 @@ mod tests {
     fn rule_network_mismatch() {
         let node = signer(0x11);
         let (_, mint, proof) = genesis_token(&node, None);
-        let token = Token::new(
-            CertifiedMintTransaction::new(mint, REFERENCE_TIME, proof),
-            Vec::new(),
-        );
+        let token = Token::new(CertifiedMintTransaction::new(mint, proof), Vec::new());
         // Mint is on LOCAL; verify against a (valid) MAINNET trust base.
         let mainnet = RootTrustBase::new(
             0,
@@ -973,17 +972,14 @@ mod tests {
         // Replace the certified lock script with one that is not the minter key.
         let stranger = signer(0x77);
         let c = cert(&proof);
-        proof.certification_data = Some(CertificationData::new(
+        proof.certification_data = Some(CertificationData::new_with_timeout(
             SignaturePredicate::new(stranger.public_key()).to_encoded(),
             c.source_state_hash().clone(),
             c.transaction_hash().clone(),
             TIMEOUT,
             c.unlock_script().to_vec(),
         ));
-        let token = Token::new(
-            CertifiedMintTransaction::new(mint, REFERENCE_TIME, proof),
-            Vec::new(),
-        );
+        let token = Token::new(CertifiedMintTransaction::new(mint, proof), Vec::new());
         assert_eq!(
             token.verify(&tb),
             Err(VerificationError::InvalidMintLockScript)
@@ -996,10 +992,7 @@ mod tests {
         // A justified mint whose proof is otherwise fully valid reaches — and
         // fails at — the justification rule (no verifier is registered).
         let (tb, mint, proof) = genesis_token(&node, Some(alloc::vec![0xde, 0xad]));
-        let token = Token::new(
-            CertifiedMintTransaction::new(mint, REFERENCE_TIME, proof),
-            Vec::new(),
-        );
+        let token = Token::new(CertifiedMintTransaction::new(mint, proof), Vec::new());
         assert_eq!(
             token.verify(&tb),
             Err(VerificationError::UnsupportedMintJustification)
@@ -1012,10 +1005,7 @@ mod tests {
     fn rule_invalid_trust_base() {
         let node = signer(0x11);
         let (_, mint, proof) = genesis_token(&node, None);
-        let token = Token::new(
-            CertifiedMintTransaction::new(mint, REFERENCE_TIME, proof),
-            Vec::new(),
-        );
+        let token = Token::new(CertifiedMintTransaction::new(mint, proof), Vec::new());
 
         // Threshold of zero would accept an unsigned seal.
         let zero_threshold = RootTrustBase::new(
@@ -1067,10 +1057,7 @@ mod tests {
         let node = signer(0x11);
         let (tb, mint, mut proof) = genesis_token(&node, None);
         proof.unicity_certificate.unicity_seal.hash = alloc::vec![0u8; 32]; // break seal root
-        let token = Token::new(
-            CertifiedMintTransaction::new(mint, REFERENCE_TIME, proof),
-            Vec::new(),
-        );
+        let token = Token::new(CertifiedMintTransaction::new(mint, proof), Vec::new());
         assert_eq!(
             token.verify(&tb),
             Err(VerificationError::Genesis(alloc::boxed::Box::new(
@@ -1086,10 +1073,10 @@ mod tests {
         let node = signer(0x11);
         let owner = signer(0x55); // genesis recipient == transfer owner
         let (tb, mint, genesis_proof) = genesis_token(&node, None);
-        let genesis = CertifiedMintTransaction::new(mint, REFERENCE_TIME, genesis_proof);
+        let genesis = CertifiedMintTransaction::new(mint, genesis_proof);
 
         let recipient = signer(0x88);
-        let transfer = TransferTransaction::new(
+        let transfer = TransferTransaction::new_with_timeout(
             genesis.result_state_hash(),
             genesis.recipient().clone(),
             SignaturePredicate::new(recipient.public_key()).to_encoded(),
@@ -1104,7 +1091,6 @@ mod tests {
             genesis.clone(),
             alloc::vec![CertifiedTransferTransaction::new(
                 transfer.clone(),
-                REFERENCE_TIME,
                 transfer_proof.clone()
             )],
         );
@@ -1114,11 +1100,7 @@ mod tests {
         transfer_proof.unicity_certificate.unicity_seal.hash = alloc::vec![0u8; 32];
         let tampered = Token::new(
             genesis,
-            alloc::vec![CertifiedTransferTransaction::new(
-                transfer,
-                REFERENCE_TIME,
-                transfer_proof
-            )],
+            alloc::vec![CertifiedTransferTransaction::new(transfer, transfer_proof)],
         );
         assert_eq!(
             tampered.verify(&tb),
@@ -1139,10 +1121,10 @@ mod tests {
         // matches and the transfer is rejected.
         let node = signer(0x11);
         let (tb, mint, genesis_proof) = genesis_token(&node, None);
-        let genesis = CertifiedMintTransaction::new(mint, REFERENCE_TIME, genesis_proof.clone());
+        let genesis = CertifiedMintTransaction::new(mint, genesis_proof.clone());
 
         let recipient = signer(0x88);
-        let transfer = TransferTransaction::new(
+        let transfer = TransferTransaction::new_with_timeout(
             genesis.result_state_hash(),
             genesis.recipient().clone(),
             SignaturePredicate::new(recipient.public_key()).to_encoded(),
@@ -1154,11 +1136,7 @@ mod tests {
         // The genesis proof does not attest to the transfer's transaction.
         let tampered = Token::new(
             genesis,
-            alloc::vec![CertifiedTransferTransaction::new(
-                transfer,
-                REFERENCE_TIME,
-                genesis_proof
-            )],
+            alloc::vec![CertifiedTransferTransaction::new(transfer, genesis_proof)],
         );
         let result = tampered.verify(&tb);
         assert!(

@@ -16,7 +16,7 @@
 //! [`payment::verify_payment_token`]: unicity_token::payment::verify_payment_token
 
 use std::path::Path;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use num_bigint::BigUint;
 
@@ -41,14 +41,6 @@ const DEFAULT_TRUSTBASE: &str = "bft-trustbase.testnet2.json";
 /// A fixed burn state mask so the split's burn transfer can be re-submitted
 /// through `client::transfer` and reproduced byte-for-byte.
 const BURN_STATE_MASK: [u8; 32] = [0x42; 32];
-
-fn request_timeout() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock before Unix epoch")
-        .as_secs()
-        + 3600
-}
 
 /// Build an aggregator client and its trust base from `e2e/.env`.
 fn load() -> (HttpAggregatorClient, RootTrustBase) {
@@ -106,7 +98,6 @@ fn mint_split_output(
     let transaction = MintTransaction::create(
         out.network_id,
         out.recipient.clone(),
-        request_timeout(),
         out.token_type.clone(),
         out.salt.clone(),
         Some(out.assets.to_cbor()),
@@ -125,12 +116,8 @@ fn mint_split_output(
     let proof = aggregator
         .get_inclusion_proof(&state_id)
         .expect("split output inclusion proof");
-    let reference_time = proof
-        .reference_time
-        .expect("split output proof reference time");
-
     let token = Token::new(
-        CertifiedMintTransaction::new(transaction, reference_time, proof),
+        CertifiedMintTransaction::new(transaction, proof),
         Vec::new(),
     );
 
@@ -185,7 +172,6 @@ fn main() {
         &trust_base,
         trust_base.network_id,
         &SignaturePredicate::new(alice.public_key()),
-        request_timeout(),
         coin_type.clone(),
         TokenSalt::random().expect("salt"),
         Some(source_payment.to_cbor()),
@@ -225,7 +211,6 @@ fn main() {
         &registry,
         PaymentAssetCollection::from_cbor_bytes,
         requests,
-        request_timeout(),
         Some(BURN_STATE_MASK),
     )
     .expect("build split");
@@ -239,7 +224,6 @@ fn main() {
         &source,
         &split.burn.owner_predicate,
         &alice,
-        request_timeout(),
         StateMask::from_bytes(BURN_STATE_MASK),
         Some(split.burn.manifest.clone()),
     )

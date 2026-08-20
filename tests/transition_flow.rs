@@ -8,13 +8,18 @@
 //! confirms the Rust SDK decodes those exact bytes, round-trips them
 //! byte-for-byte, and reaches the same verification decisions (RSMT v6a,
 //! big-endian bit order).
+//!
+//! The Alice/Bob/Carol tokens use the service-default request profile, which
+//! carries no timeout and needs no client clock. `explicitTimeoutToken` uses
+//! the explicit-timeout profile, so both encodings are covered by the same
+//! cross-SDK vector.
 
 use unicity_token::api::bft::root_trust_base::RootTrustBaseNodeInfo;
 use unicity_token::api::bft::RootTrustBase;
 use unicity_token::api::{CertificationData, NetworkId};
 use unicity_token::crypto::hash::sha256;
 use unicity_token::crypto::signature::PublicKey;
-use unicity_token::transaction::{CertifiedTransferTransaction, Token};
+use unicity_token::transaction::{CertifiedTransferTransaction, Token, Transaction};
 use unicity_token::verify::VerificationError;
 
 const FIXTURE: &str = include_str!("vectors/transition_flow.json");
@@ -58,16 +63,53 @@ fn token(name: &str) -> (Vec<u8>, Token) {
 
 #[test]
 fn decodes_and_roundtrips_byte_for_byte() {
-    for name in ["aliceToken", "bobToken", "carolToken"] {
+    for name in [
+        "aliceToken",
+        "bobToken",
+        "carolToken",
+        "explicitTimeoutToken",
+    ] {
         let (bytes, token) = token(name);
         assert_eq!(token.to_cbor(), bytes, "{name} did not round-trip");
     }
 }
 
+/// Both request profiles cross the SDK boundary: the default flow carries no
+/// timeout, and the explicit one carries a deadline the round's reference time
+/// is below.
+#[test]
+fn covers_both_request_profiles() {
+    let tb = trust_base();
+
+    let (_, default_token) = token("aliceToken");
+    assert_eq!(default_token.genesis().transaction().timeout(), None);
+    default_token.verify(&tb).expect("default profile verifies");
+
+    let (_, explicit_token) = token("explicitTimeoutToken");
+    let genesis = explicit_token.genesis();
+    let timeout = genesis
+        .transaction()
+        .timeout()
+        .expect("explicit profile carries a timeout");
+    assert!(
+        genesis.reference_time() < timeout,
+        "certified reference time {} must precede the request timeout {timeout}",
+        genesis.reference_time()
+    );
+    explicit_token
+        .verify(&tb)
+        .expect("explicit profile verifies");
+}
+
 #[test]
 fn verifies_against_trust_base() {
     let tb = trust_base();
-    for name in ["aliceToken", "bobToken", "carolToken"] {
+    for name in [
+        "aliceToken",
+        "bobToken",
+        "carolToken",
+        "explicitTimeoutToken",
+    ] {
         let (_, token) = token(name);
         token
             .verify(&tb)
@@ -204,19 +246,28 @@ fn rejects_mismatched_transfer_certification_state() {
         .certification_data
         .as_ref()
         .expect("fixture has certification data");
-    proof.certification_data = Some(CertificationData::new(
-        data.lock_script().clone(),
-        sha256(b"unrelated source state"),
-        data.transaction_hash().clone(),
-        data.timeout(),
-        data.unlock_script().to_vec(),
-    ));
+    // Rebuild in whichever request profile the fixture used, so only the
+    // substituted source state differs.
+    proof.certification_data = Some(match data.timeout() {
+        None => CertificationData::new(
+            data.lock_script().clone(),
+            sha256(b"unrelated source state"),
+            data.transaction_hash().clone(),
+            data.unlock_script().to_vec(),
+        ),
+        Some(timeout) => CertificationData::new_with_timeout(
+            data.lock_script().clone(),
+            sha256(b"unrelated source state"),
+            data.transaction_hash().clone(),
+            timeout,
+            data.unlock_script().to_vec(),
+        ),
+    });
 
     let forged = Token::new(
         token.genesis().clone(),
         vec![CertifiedTransferTransaction::new(
             certified.transaction().clone(),
-            certified.reference_time(),
             proof,
         )],
     );
