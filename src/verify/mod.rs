@@ -44,6 +44,7 @@ use alloc::vec::Vec;
 
 use crate::api::bft::{RootTrustBase, UnicityCertificate};
 use crate::api::inclusion_proof::InclusionProof;
+use crate::api::leaf_value::calculate_leaf_value;
 use crate::api::{NonInclusionProof, StateId};
 use crate::crypto::hash::{DataHash, HashAlgorithm};
 use crate::predicate::builtin::SignaturePredicate;
@@ -99,6 +100,7 @@ pub(crate) fn verify_token_in_context(
             context.trust_base(),
             transfer.inclusion_proof(),
             transfer.transaction(),
+            transfer.reference_time(),
         )
         .map_err(|e| VerificationError::Transfer {
             index: i,
@@ -138,8 +140,13 @@ fn verify_genesis(
         return Err(VerificationError::InvalidMintLockScript);
     }
 
-    verify_inclusion_proof(trust_base, genesis.inclusion_proof(), mint)
-        .map_err(|e| VerificationError::Genesis(alloc::boxed::Box::new(e)))?;
+    verify_inclusion_proof(
+        trust_base,
+        genesis.inclusion_proof(),
+        mint,
+        genesis.reference_time(),
+    )
+    .map_err(|e| VerificationError::Genesis(alloc::boxed::Box::new(e)))?;
 
     // Mint justification: dispatch through the registry. An empty registry
     // rejects any present justification (fail closed); a registered verifier
@@ -156,6 +163,7 @@ fn verify_inclusion_proof(
     trust_base: &RootTrustBase,
     proof: &InclusionProof,
     transaction: &impl Transaction,
+    reference_time: u64,
 ) -> Result<(), VerificationError> {
     proof
         .inclusion_certificate
@@ -182,17 +190,23 @@ fn verify_inclusion_proof(
     // delegate the relation, shard, UC, and witness checks to the public
     // state-membership verifier.
     let state_id = StateId::derive(transaction.lock_script(), transaction.source_state_hash());
-    verify_inclusion_proof_for(trust_base, proof, &state_id)
+    verify_inclusion_proof_for(trust_base, proof, &state_id, reference_time)
 }
 
 /// Verify that `state_id` is included at the certified root carried by `proof`.
 ///
 /// This verifies the proof's certification data and witness, but does not claim
 /// that its transaction hash belongs to a caller-supplied transaction object.
+///
+/// `reference_time` is the value the certified leaf was built from. It comes
+/// from the caller, not from the proof's own unicity certificate: the tree is
+/// append-only, so the proof may have been issued against a later root whose
+/// input record carries a later reference time.
 pub fn verify_inclusion_proof_for(
     trust_base: &RootTrustBase,
     proof: &InclusionProof,
     state_id: &StateId,
+    reference_time: u64,
 ) -> Result<(), VerificationError> {
     trust_base
         .validate()
@@ -219,11 +233,8 @@ pub fn verify_inclusion_proof_for(
         proof.unicity_certificate.input_record.hash.clone(),
     )
     .map_err(|_| VerificationError::PathInvalid)?;
-    if !inclusion_certificate.verify(
-        state_id,
-        certification_data.transaction_hash(),
-        &expected_root,
-    ) {
+    let leaf_value = calculate_leaf_value(certification_data.transaction_hash(), reference_time);
+    if !inclusion_certificate.verify(state_id, &leaf_value, &expected_root) {
         return Err(VerificationError::PathInvalid);
     }
 
@@ -239,6 +250,7 @@ pub fn verify_inclusion_proof_for(
     // Finally, the unlock script must satisfy the (reconstructed) lock script.
     verify_predicate(
         certification_data.lock_script(),
+        reference_time,
         certification_data.source_state_hash(),
         certification_data.transaction_hash(),
         certification_data.unlock_script(),
@@ -347,6 +359,7 @@ pub fn verify_non_inclusion_proof(
 
 fn verify_predicate(
     lock_script: &EncodedPredicate,
+    _reference_time: u64,
     source_state_hash: &DataHash,
     transaction_hash: &DataHash,
     unlock_script: &[u8],
@@ -375,6 +388,9 @@ fn verify_predicate(
 #[cfg(all(test, feature = "client"))]
 mod tests {
     use super::*;
+
+    /// Reference time every fixture in this module certifies under.
+    const REFERENCE_TIME: u64 = 1755000000;
 
     use alloc::string::{String, ToString};
 
@@ -510,7 +526,7 @@ mod tests {
     ) -> InclusionProof {
         let tx_hash = transaction.calculate_transaction_hash();
         let state_id = StateId::derive(transaction.lock_script(), transaction.source_state_hash());
-        let root = leaf_root(&state_id, &tx_hash);
+        let root = leaf_root(&state_id, &calculate_leaf_value(&tx_hash, REFERENCE_TIME));
         let unlock = sign_signature_unlock(owner, transaction.source_state_hash(), &tx_hash);
         let certification_data = CertificationData::new(
             transaction.lock_script().clone(),
@@ -520,6 +536,7 @@ mod tests {
         );
         InclusionProof {
             certification_data: Some(certification_data),
+            reference_time: Some(REFERENCE_TIME),
             inclusion_certificate: Some(InclusionCertificate::decode(&[0u8; 32]).unwrap()),
             unicity_certificate: signed_uc(node, root),
         }
@@ -577,11 +594,14 @@ mod tests {
     #[test]
     fn baseline_transfer_proof_verifies() {
         let (tb, _node, _owner, transfer, proof) = transfer_case();
-        assert_eq!(verify_inclusion_proof(&tb, &proof, &transfer), Ok(()));
-        let target = StateId::derive(transfer.lock_script(), transfer.source_state_hash());
-        assert_eq!(proof.verify_for(&target, &tb), Ok(()));
         assert_eq!(
-            proof.verify_for(&state_id([0xff; 32]), &tb),
+            verify_inclusion_proof(&tb, &proof, &transfer, REFERENCE_TIME),
+            Ok(())
+        );
+        let target = StateId::derive(transfer.lock_script(), transfer.source_state_hash());
+        assert_eq!(proof.verify_for(&target, REFERENCE_TIME, &tb), Ok(()));
+        assert_eq!(
+            proof.verify_for(&state_id([0xff; 32]), REFERENCE_TIME, &tb),
             Err(VerificationError::CertificationDataMismatch)
         );
     }
@@ -688,7 +708,7 @@ mod tests {
         let (tb, _n, _o, transfer, mut proof) = transfer_case();
         proof.inclusion_certificate = None;
         assert_eq!(
-            verify_inclusion_proof(&tb, &proof, &transfer),
+            verify_inclusion_proof(&tb, &proof, &transfer, REFERENCE_TIME),
             Err(VerificationError::InclusionCertificateMissing)
         );
     }
@@ -698,7 +718,7 @@ mod tests {
         let (tb, _n, _o, transfer, mut proof) = transfer_case();
         proof.certification_data = None;
         assert_eq!(
-            verify_inclusion_proof(&tb, &proof, &transfer),
+            verify_inclusion_proof(&tb, &proof, &transfer, REFERENCE_TIME),
             Err(VerificationError::CertificationDataMissing)
         );
     }
@@ -715,7 +735,7 @@ mod tests {
             c.unlock_script().to_vec(),
         ));
         assert_eq!(
-            verify_inclusion_proof(&tb, &proof, &transfer),
+            verify_inclusion_proof(&tb, &proof, &transfer, REFERENCE_TIME),
             Err(VerificationError::CertificationDataMismatch)
         );
     }
@@ -731,7 +751,7 @@ mod tests {
             c.unlock_script().to_vec(),
         ));
         assert_eq!(
-            verify_inclusion_proof(&tb, &proof, &transfer),
+            verify_inclusion_proof(&tb, &proof, &transfer, REFERENCE_TIME),
             Err(VerificationError::CertificationDataMismatch)
         );
     }
@@ -747,7 +767,7 @@ mod tests {
             c.unlock_script().to_vec(),
         ));
         assert_eq!(
-            verify_inclusion_proof(&tb, &proof, &transfer),
+            verify_inclusion_proof(&tb, &proof, &transfer, REFERENCE_TIME),
             Err(VerificationError::TransactionHashMismatch)
         );
     }
@@ -759,7 +779,7 @@ mod tests {
         proof.unicity_certificate.input_record.hash = alloc::vec![0xCDu8; 32];
         reseal(&mut proof, &node); // keep the seal consistent so PATH fails first
         assert_eq!(
-            verify_inclusion_proof(&tb, &proof, &transfer),
+            verify_inclusion_proof(&tb, &proof, &transfer, REFERENCE_TIME),
             Err(VerificationError::PathInvalid)
         );
     }
@@ -772,7 +792,7 @@ mod tests {
         encoded.push(0b1000_0000);
         proof.unicity_certificate.shard_tree_certificate.shard = ShardId::decode(&encoded).unwrap();
         assert_eq!(
-            verify_inclusion_proof(&tb, &proof, &transfer),
+            verify_inclusion_proof(&tb, &proof, &transfer, REFERENCE_TIME),
             Err(VerificationError::ShardMismatch)
         );
     }
@@ -782,7 +802,7 @@ mod tests {
         let (tb, _n, _o, transfer, mut proof) = transfer_case();
         proof.unicity_certificate.unicity_seal.network_id = NetworkId::MAINNET;
         assert_eq!(
-            verify_inclusion_proof(&tb, &proof, &transfer),
+            verify_inclusion_proof(&tb, &proof, &transfer, REFERENCE_TIME),
             Err(VerificationError::SealNetworkMismatch)
         );
     }
@@ -792,7 +812,7 @@ mod tests {
         let (tb, _n, _o, transfer, mut proof) = transfer_case();
         proof.unicity_certificate.unicity_seal.hash = alloc::vec![0u8; 32];
         assert_eq!(
-            verify_inclusion_proof(&tb, &proof, &transfer),
+            verify_inclusion_proof(&tb, &proof, &transfer, REFERENCE_TIME),
             Err(VerificationError::SealRootMismatch)
         );
     }
@@ -802,7 +822,7 @@ mod tests {
         let (tb, _n, _o, transfer, mut proof) = transfer_case();
         proof.unicity_certificate.unicity_seal.signatures = Vec::new();
         assert_eq!(
-            verify_inclusion_proof(&tb, &proof, &transfer),
+            verify_inclusion_proof(&tb, &proof, &transfer, REFERENCE_TIME),
             Err(VerificationError::QuorumNotMet)
         );
     }
@@ -814,7 +834,7 @@ mod tests {
         let rogue = signer(0xEE);
         let proof = valid_proof(&transfer, &owner, &rogue);
         assert_eq!(
-            verify_inclusion_proof(&tb, &proof, &transfer),
+            verify_inclusion_proof(&tb, &proof, &transfer, REFERENCE_TIME),
             Err(VerificationError::QuorumNotMet)
         );
     }
@@ -832,7 +852,7 @@ mod tests {
             unlock,
         ));
         assert_eq!(
-            verify_inclusion_proof(&tb, &proof, &transfer),
+            verify_inclusion_proof(&tb, &proof, &transfer, REFERENCE_TIME),
             Err(VerificationError::NotAuthenticated)
         );
     }
@@ -844,7 +864,7 @@ mod tests {
         let thief = signer(0x44);
         let proof = valid_proof(&transfer, &thief, &node);
         assert_eq!(
-            verify_inclusion_proof(&tb, &proof, &transfer),
+            verify_inclusion_proof(&tb, &proof, &transfer, REFERENCE_TIME),
             Err(VerificationError::NotAuthenticated)
         );
     }
@@ -875,7 +895,10 @@ mod tests {
     fn baseline_genesis_token_verifies() {
         let node = signer(0x11);
         let (tb, mint, proof) = genesis_token(&node, None);
-        let token = Token::new(CertifiedMintTransaction::new(mint, proof), Vec::new());
+        let token = Token::new(
+            CertifiedMintTransaction::new(mint, REFERENCE_TIME, proof),
+            Vec::new(),
+        );
         assert_eq!(token.verify(&tb), Ok(()));
     }
 
@@ -883,7 +906,10 @@ mod tests {
     fn rule_network_mismatch() {
         let node = signer(0x11);
         let (_, mint, proof) = genesis_token(&node, None);
-        let token = Token::new(CertifiedMintTransaction::new(mint, proof), Vec::new());
+        let token = Token::new(
+            CertifiedMintTransaction::new(mint, REFERENCE_TIME, proof),
+            Vec::new(),
+        );
         // Mint is on LOCAL; verify against a (valid) MAINNET trust base.
         let mainnet = RootTrustBase::new(
             0,
@@ -912,7 +938,10 @@ mod tests {
             c.transaction_hash().clone(),
             c.unlock_script().to_vec(),
         ));
-        let token = Token::new(CertifiedMintTransaction::new(mint, proof), Vec::new());
+        let token = Token::new(
+            CertifiedMintTransaction::new(mint, REFERENCE_TIME, proof),
+            Vec::new(),
+        );
         assert_eq!(
             token.verify(&tb),
             Err(VerificationError::InvalidMintLockScript)
@@ -925,7 +954,10 @@ mod tests {
         // A justified mint whose proof is otherwise fully valid reaches — and
         // fails at — the justification rule (no verifier is registered).
         let (tb, mint, proof) = genesis_token(&node, Some(alloc::vec![0xde, 0xad]));
-        let token = Token::new(CertifiedMintTransaction::new(mint, proof), Vec::new());
+        let token = Token::new(
+            CertifiedMintTransaction::new(mint, REFERENCE_TIME, proof),
+            Vec::new(),
+        );
         assert_eq!(
             token.verify(&tb),
             Err(VerificationError::UnsupportedMintJustification)
@@ -938,7 +970,10 @@ mod tests {
     fn rule_invalid_trust_base() {
         let node = signer(0x11);
         let (_, mint, proof) = genesis_token(&node, None);
-        let token = Token::new(CertifiedMintTransaction::new(mint, proof), Vec::new());
+        let token = Token::new(
+            CertifiedMintTransaction::new(mint, REFERENCE_TIME, proof),
+            Vec::new(),
+        );
 
         // Threshold of zero would accept an unsigned seal.
         let zero_threshold = RootTrustBase::new(
@@ -990,7 +1025,10 @@ mod tests {
         let node = signer(0x11);
         let (tb, mint, mut proof) = genesis_token(&node, None);
         proof.unicity_certificate.unicity_seal.hash = alloc::vec![0u8; 32]; // break seal root
-        let token = Token::new(CertifiedMintTransaction::new(mint, proof), Vec::new());
+        let token = Token::new(
+            CertifiedMintTransaction::new(mint, REFERENCE_TIME, proof),
+            Vec::new(),
+        );
         assert_eq!(
             token.verify(&tb),
             Err(VerificationError::Genesis(alloc::boxed::Box::new(
@@ -1006,7 +1044,7 @@ mod tests {
         let node = signer(0x11);
         let owner = signer(0x55); // genesis recipient == transfer owner
         let (tb, mint, genesis_proof) = genesis_token(&node, None);
-        let genesis = CertifiedMintTransaction::new(mint, genesis_proof);
+        let genesis = CertifiedMintTransaction::new(mint, REFERENCE_TIME, genesis_proof);
 
         let recipient = signer(0x88);
         let transfer = TransferTransaction::new(
@@ -1023,6 +1061,7 @@ mod tests {
             genesis.clone(),
             alloc::vec![CertifiedTransferTransaction::new(
                 transfer.clone(),
+                REFERENCE_TIME,
                 transfer_proof.clone()
             )],
         );
@@ -1032,7 +1071,11 @@ mod tests {
         transfer_proof.unicity_certificate.unicity_seal.hash = alloc::vec![0u8; 32];
         let tampered = Token::new(
             genesis,
-            alloc::vec![CertifiedTransferTransaction::new(transfer, transfer_proof)],
+            alloc::vec![CertifiedTransferTransaction::new(
+                transfer,
+                REFERENCE_TIME,
+                transfer_proof
+            )],
         );
         assert_eq!(
             tampered.verify(&tb),
@@ -1053,7 +1096,7 @@ mod tests {
         // matches and the transfer is rejected.
         let node = signer(0x11);
         let (tb, mint, genesis_proof) = genesis_token(&node, None);
-        let genesis = CertifiedMintTransaction::new(mint, genesis_proof.clone());
+        let genesis = CertifiedMintTransaction::new(mint, REFERENCE_TIME, genesis_proof.clone());
 
         let recipient = signer(0x88);
         let transfer = TransferTransaction::new(
@@ -1067,7 +1110,11 @@ mod tests {
         // The genesis proof does not attest to the transfer's transaction.
         let tampered = Token::new(
             genesis,
-            alloc::vec![CertifiedTransferTransaction::new(transfer, genesis_proof)],
+            alloc::vec![CertifiedTransferTransaction::new(
+                transfer,
+                REFERENCE_TIME,
+                genesis_proof
+            )],
         );
         let result = tampered.verify(&tb);
         assert!(

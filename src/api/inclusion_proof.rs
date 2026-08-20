@@ -23,6 +23,13 @@ const VERSION: u64 = 1;
 pub struct InclusionProof {
     /// What was certified (present for an inclusion proof).
     pub certification_data: Option<CertificationData>,
+    /// Reference time of the round the certified leaf was created in (present
+    /// for an inclusion proof).
+    ///
+    /// It cannot be recovered from the certificate chain: an aggregator serves
+    /// proofs against the current certified root, whose input record time is
+    /// that of the latest round rather than the one the leaf was created under.
+    pub reference_time: Option<u64>,
     /// The SMT path (present for an inclusion proof).
     pub inclusion_certificate: Option<InclusionCertificate>,
     /// The BFT unicity certificate.
@@ -33,17 +40,19 @@ impl InclusionProof {
     /// Decode from CBOR (tagged).
     pub fn from_cbor(d: Decoder<'_>) -> Result<Self, Error> {
         let inner = d.expect_tag(INCLUSION_PROOF_TAG)?;
-        let items = inner.array(Some(4))?;
+        let items = inner.array(Some(5))?;
         if items[0].uint()? != VERSION {
             return Err(Error::UnexpectedValue("unsupported InclusionProof version"));
         }
         let certification_data = items[1].nullable(CertificationData::from_cbor)?;
+        let reference_time = items[2].nullable(|x| x.uint().map_err(Into::into))?;
         let inclusion_certificate =
-            items[2].nullable(|x| InclusionCertificate::decode(x.bytes_value()?))?;
+            items[3].nullable(|x| InclusionCertificate::decode(x.bytes_value()?))?;
         Ok(InclusionProof {
             certification_data,
+            reference_time,
             inclusion_certificate,
-            unicity_certificate: UnicityCertificate::from_cbor(items[3])?,
+            unicity_certificate: UnicityCertificate::from_cbor(items[4])?,
         })
     }
 
@@ -54,6 +63,7 @@ impl InclusionProof {
             &encode_array(&[
                 &encode_uint(VERSION),
                 &encode_nullable(self.certification_data.as_ref(), |c| c.to_cbor()),
+                &encode_nullable(self.reference_time.as_ref(), |t| encode_uint(*t)),
                 &encode_nullable(self.inclusion_certificate.as_ref(), |c| {
                     encode_byte_string(&c.encode())
                 }),
@@ -67,11 +77,16 @@ impl InclusionProof {
     /// This verifies the state relation, certification data, shard, quorum UC,
     /// and unlock witness. Transaction/token verification may impose additional
     /// application-level constraints.
+    ///
+    /// `reference_time` is the value the leaf was built from; it is taken from
+    /// the caller rather than from this proof's certificate, because the tree
+    /// is append-only and a proof may be issued against a later root.
     pub fn verify_for(
         &self,
         state_id: &StateId,
+        reference_time: u64,
         trust_base: &RootTrustBase,
     ) -> Result<(), VerificationError> {
-        verify::verify_inclusion_proof_for(trust_base, self, state_id)
+        verify::verify_inclusion_proof_for(trust_base, self, state_id, reference_time)
     }
 }

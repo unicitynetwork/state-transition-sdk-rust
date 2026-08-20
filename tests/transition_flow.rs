@@ -215,6 +215,7 @@ fn rejects_mismatched_transfer_certification_state() {
         token.genesis().clone(),
         vec![CertifiedTransferTransaction::new(
             certified.transaction().clone(),
+            certified.reference_time(),
             proof,
         )],
     );

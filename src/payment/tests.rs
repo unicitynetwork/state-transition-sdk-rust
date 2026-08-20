@@ -19,6 +19,7 @@ use crate::api::bft::{
     InputRecord, RootTrustBase, RootTrustBaseNodeInfo, ShardId, ShardTreeCertificate,
     UnicityCertificate, UnicitySeal, UnicityTreeCertificate,
 };
+use crate::api::calculate_leaf_value;
 use crate::api::inclusion_proof::InclusionProof;
 use crate::api::{CertificationData, InclusionCertificate, NetworkId, StateId};
 use crate::crypto::hash::{sha256, DataHash};
@@ -36,6 +37,9 @@ use crate::verify::{
     verify_token_with_policy, MintJustificationRegistry, VerificationError, VerificationLimits,
     VerificationPolicy,
 };
+
+/// Reference time every fixture in this module certifies under.
+const REFERENCE_TIME: u64 = 1755000000;
 
 // --- proof construction (mirrors the verify-engine test harness) -----------
 
@@ -126,7 +130,7 @@ fn valid_proof(
 ) -> InclusionProof {
     let tx_hash = transaction.calculate_transaction_hash();
     let state_id = StateId::derive(transaction.lock_script(), transaction.source_state_hash());
-    let root = leaf_root(&state_id, &tx_hash);
+    let root = leaf_root(&state_id, &calculate_leaf_value(&tx_hash, REFERENCE_TIME));
     let unlock = sign_signature_unlock(owner, transaction.source_state_hash(), &tx_hash);
     let certification_data = CertificationData::new(
         transaction.lock_script().clone(),
@@ -136,6 +140,7 @@ fn valid_proof(
     );
     InclusionProof {
         certification_data: Some(certification_data),
+        reference_time: Some(REFERENCE_TIME),
         inclusion_certificate: Some(InclusionCertificate::decode(&[0u8; 32]).unwrap()),
         unicity_certificate: signed_uc(node, root),
     }
@@ -174,7 +179,10 @@ fn source_token(node: &Secp256k1Signer, owner: &Secp256k1Signer) -> Token {
     .unwrap();
     let minter = Minter::signer(mint.token_id()).unwrap();
     let proof = valid_proof(&mint, &minter, node);
-    Token::new(CertifiedMintTransaction::new(mint, proof), Vec::new())
+    Token::new(
+        CertifiedMintTransaction::new(mint, REFERENCE_TIME, proof),
+        Vec::new(),
+    )
 }
 
 /// Wrap a burn transfer into a certified, burned source token.
@@ -187,7 +195,11 @@ fn burned_token(
     let proof = valid_proof(&burn_tx, owner, node);
     Token::new(
         source.genesis().clone(),
-        vec![CertifiedTransferTransaction::new(burn_tx, proof)],
+        vec![CertifiedTransferTransaction::new(
+            burn_tx,
+            REFERENCE_TIME,
+            proof,
+        )],
     )
 }
 
@@ -212,7 +224,10 @@ fn mint_output(
     .unwrap();
     let minter = Minter::signer(mint.token_id()).unwrap();
     let proof = valid_proof(&mint, &minter, node);
-    Token::new(CertifiedMintTransaction::new(mint, proof), Vec::new())
+    Token::new(
+        CertifiedMintTransaction::new(mint, REFERENCE_TIME, proof),
+        Vec::new(),
+    )
 }
 
 fn registry() -> MintJustificationRegistry {

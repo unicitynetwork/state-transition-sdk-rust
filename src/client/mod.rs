@@ -154,9 +154,14 @@ pub fn mint<A: AggregatorClient>(
     let proof = aggregator
         .get_inclusion_proof(&state_id)
         .map_err(ClientError::Aggregator)?;
+    // Fix the reference time now, from the proof that first establishes the
+    // leaf; a proof fetched later is issued against a later root.
+    let reference_time = proof
+        .reference_time
+        .ok_or(ClientError::Verification(VerificationError::PathInvalid))?;
 
     let token = Token::new(
-        CertifiedMintTransaction::new(transaction, proof),
+        CertifiedMintTransaction::new(transaction, reference_time, proof),
         Vec::new(),
     );
     token.verify(trust_base)?;
@@ -195,9 +200,16 @@ pub fn transfer<A: AggregatorClient>(
     let proof = aggregator
         .get_inclusion_proof(&state_id)
         .map_err(ClientError::Aggregator)?;
+    let reference_time = proof
+        .reference_time
+        .ok_or(ClientError::Verification(VerificationError::PathInvalid))?;
 
     let mut transactions = token.transactions().to_vec();
-    transactions.push(CertifiedTransferTransaction::new(transaction, proof));
+    transactions.push(CertifiedTransferTransaction::new(
+        transaction,
+        reference_time,
+        proof,
+    ));
     let next = Token::new(token.genesis().clone(), transactions);
     next.verify(trust_base)?;
     Ok(next)
