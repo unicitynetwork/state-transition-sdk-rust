@@ -769,6 +769,32 @@ mod tests {
     }
 
     #[test]
+    fn rule_certification_data_mismatch_timeout() {
+        let (tb, _n, _o, transfer, mut proof) = transfer_case();
+        let c = cert(&proof);
+        proof.certification_data = Some(CertificationData::new(
+            c.lock_script().clone(),
+            c.source_state_hash().clone(),
+            c.transaction_hash().clone(),
+            TIMEOUT + 1,
+            c.unlock_script().to_vec(),
+        ));
+        assert_eq!(
+            verify_inclusion_proof(&tb, &proof, &transfer, REFERENCE_TIME),
+            Err(VerificationError::CertificationDataMismatch)
+        );
+    }
+
+    #[test]
+    fn rule_request_expires_at_timeout_boundary() {
+        let (tb, _n, _o, transfer, proof) = transfer_case();
+        assert_eq!(
+            verify_inclusion_proof(&tb, &proof, &transfer, TIMEOUT),
+            Err(VerificationError::RequestExpired)
+        );
+    }
+
+    #[test]
     fn rule_transaction_hash_mismatch() {
         let (tb, _n, _o, transfer, mut proof) = transfer_case();
         let c = cert(&proof);

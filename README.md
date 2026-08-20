@@ -41,7 +41,7 @@ token.verify(&trust_base)?;                  // verifies the cryptographic histo
 ## Mint & transfer against a live aggregator (`http` feature)
 
 ```rust
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use unicity_token::api::bft::RootTrustBase;
 use unicity_token::client::{self, HttpAggregatorClient};
 
@@ -49,10 +49,19 @@ let trust_base = RootTrustBase::from_json(&std::fs::read_to_string("trust-base.j
 let aggregator = HttpAggregatorClient::new("https://gateway.testnet2.unicity.network/")
     .with_api_key("sk_…")
     .with_polling(Duration::from_secs(2), 90);
+let timeout = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() + 3600;
 
 let token = client::mint(&aggregator, &trust_base, trust_base.network_id,
-    &recipient, token_type, salt, /* data */ None, /* justification */ None)?;
+    &recipient, timeout, token_type, salt, /* data */ None, /* justification */ None)?;
 ```
+
+The timeout is exclusive and expressed in Unix seconds: the service admits the request only when
+the round reference time is strictly below it. It is part of the transaction encoding, so the
+transaction hash commits to it.
+
+The returned certified transaction fixes the reference time at which its leaf was created. The
+leaf value is `SHA-256(CBOR([transactionHash, referenceTime]))`; verification keeps using that
+carried value even if the proof is later refreshed against a newer append-only tree root.
 
 The SDK is generic over the `AggregatorClient` trait, so you can plug in any
 transport (or an in-memory one for tests); `HttpAggregatorClient` is the
