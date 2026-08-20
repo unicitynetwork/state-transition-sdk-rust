@@ -68,6 +68,7 @@ fn main() {
         TokenSalt::random().expect("salt"),
         Some(encode_text_string("My custom data")),
         None,
+        /* expires_at */ None,
     )
     .expect("mint");
 

@@ -18,7 +18,6 @@ use crate::predicate::EncodedPredicate;
 
 /// CBOR tag for [`TransferTransaction`].
 pub const TRANSFER_TRANSACTION_TAG: u64 = 39045;
-/// The only accepted wire version. One version, one element count.
 pub const TRANSFER_TRANSACTION_VERSION: u64 = 2;
 const FIELD_COUNT: usize = 5;
 
@@ -39,10 +38,6 @@ impl TransferTransaction {
     /// Construct a transfer from explicit parts. `source_state_hash` and
     /// `lock_script` come from the previous transaction's resulting state /
     /// recipient.
-    ///
-    /// `expires_at` is the exclusive request deadline in Unix seconds, or
-    /// `None` to let the Unicity Service assign one, which requires no local
-    /// clock. Either way it is committed by the transaction hash.
     pub fn new(
         source_state_hash: DataHash,
         lock_script: EncodedPredicate,

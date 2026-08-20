@@ -198,11 +198,6 @@ fn verify_inclusion_proof(
 ///
 /// This verifies the proof's certification data and witness, but does not claim
 /// that its transaction hash belongs to a caller-supplied transaction object.
-///
-/// `reference_time` is the value the certified leaf was built from. It comes
-/// from the caller, not from the proof's own unicity certificate: the tree is
-/// append-only, so the proof may have been issued against a later root whose
-/// input record carries a later reference time.
 pub fn verify_inclusion_proof_for(
     trust_base: &RootTrustBase,
     proof: &InclusionProof,

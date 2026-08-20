@@ -117,9 +117,6 @@ pub fn certification_data_for(
 }
 
 /// Mint a new token and return the verified [`Token`].
-///
-/// `expires_at` is the exclusive request deadline in Unix seconds, or `None` to
-/// let the Unicity Service assign one, which requires no local clock.
 #[allow(clippy::too_many_arguments)]
 pub fn mint<A: AggregatorClient>(
     aggregator: &A,
@@ -169,9 +166,6 @@ pub fn mint<A: AggregatorClient>(
 
 /// Transfer `token` to `recipient`, authorised by `signer` (the current
 /// owner's key), and return the verified successor [`Token`].
-///
-/// `expires_at` is the exclusive request deadline in Unix seconds, or `None` to
-/// let the Unicity Service assign one, which requires no local clock.
 #[allow(clippy::too_many_arguments)]
 pub fn transfer<A: AggregatorClient>(
     aggregator: &A,

@@ -54,9 +54,8 @@ let token = client::mint(&aggregator, &trust_base, trust_base.network_id,
     /* expires_at */ None)?;
 ```
 
-`expires_at` is the exclusive request deadline in Unix seconds. Pass `None` to let the Unicity
-Service assign one from consensus time, which requires no local clock; pass `Some(deadline)` when
-the application needs its own. Either way the value is committed by the transaction hash.
+`expires_at` is the exclusive request deadline in Unix seconds. Use `None` to let the Unicity
+Service assign a default one from consensus time, or explicitly `Some(deadline)`.
 
 The SDK is generic over the `AggregatorClient` trait, so you can plug in any
 transport (or an in-memory one for tests); `HttpAggregatorClient` is the
@@ -66,9 +65,6 @@ an unknown StateID fails immediately as `HttpError::StateNotFound` instead of
 consuming the polling budget.
 
 ## Prove that a state is absent
-
-Non-inclusion has a relation-specific API; applications never need to know
-that its Merkle path has internal machinery in common with inclusion:
 
 ```rust
 use unicity_token::client::NonInclusionAggregatorClient;

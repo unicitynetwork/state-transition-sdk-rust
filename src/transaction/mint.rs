@@ -41,10 +41,6 @@ pub struct MintTransaction {
 impl MintTransaction {
     /// Build a mint transaction, deriving the token id, lock script, and mint
     /// state.
-    ///
-    /// `expires_at` is the exclusive request deadline in Unix seconds, or
-    /// `None` to let the Unicity Service assign one, which requires no local
-    /// clock. Either way it is committed by the transaction hash.
     #[allow(clippy::too_many_arguments)]
     pub fn create(
         network_id: NetworkId,

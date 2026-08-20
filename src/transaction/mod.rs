@@ -29,10 +29,8 @@ pub trait Transaction {
     fn source_state_hash(&self) -> &DataHash;
     /// The hash of the state this transaction produces.
     fn calculate_state_hash(&self) -> DataHash;
-    /// Exclusive timeout of the certification request. The Unicity Service
-    /// admits the request only in a round whose reference time is below this
-    /// value. It is part of the transaction encoding, so the transaction hash
-    /// commits to it and the unlock script signs it.
+    /// The Unicity Service admits the request only in a round whose reference
+    /// time is below this value.
     fn expires_at(&self) -> Option<u64>;
     /// CBOR encoding (tagged).
     fn to_cbor(&self) -> Vec<u8>;
