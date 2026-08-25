@@ -56,11 +56,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         &trust_base,
         trust_base.network_id,
         &alice_lock,
-        request_timeout()?,
         TokenType::random()?,
         TokenSalt::random()?,
         Some(encode_text_string("Rust SDK live e2e mint")),
         None,
+        Some(request_timeout()?),
     )?;
 
     let minted_path = config.output_dir.join("token-minted.cbor");
@@ -76,9 +76,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         &minted,
         &bob_lock,
         &alice,
-        request_timeout()?,
         StateMask::random()?,
         Some(encode_text_string("Rust SDK live e2e transfer")),
+        Some(request_timeout()?),
     )?;
 
     let transferred_path = config.output_dir.join("token-transferred.cbor");
