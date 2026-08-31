@@ -28,7 +28,8 @@ UNICITY_TRUSTBASE=bft-trustbase.testnet2.json
 
 Values already present in the process environment take precedence. The examples
 require the `http` feature (a blocking TLS HTTP stack); they generate ephemeral
-in-memory wallets and never persist keys.
+in-memory wallets and never persist keys. Each submitted transaction uses an
+service-assigned deadline derived from consensus time, so the examples do not require a valid system clock.
 
 For a fuller standalone demo (mint → save → reload → transfer → verify), see the
 `e2e/` crate.

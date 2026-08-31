@@ -8,13 +8,20 @@
 //! confirms the Rust SDK decodes those exact bytes, round-trips them
 //! byte-for-byte, and reaches the same verification decisions (RSMT v6a,
 //! big-endian bit order).
+//!
+//! The Alice/Bob/Carol tokens leave the request deadline to the service, so
+//! their `expiresAt` is CBOR null and no client clock is involved.
+//! `explicitTimeoutToken` carries a sender-chosen deadline. Both are the same
+//! wire version with the same element count, so one vector covers the encoding
+//! with and without a value in that slot.
 
 use unicity_token::api::bft::root_trust_base::RootTrustBaseNodeInfo;
 use unicity_token::api::bft::RootTrustBase;
-use unicity_token::api::{CertificationData, NetworkId};
+use unicity_token::api::{CertificationData, InclusionProofResponse, NetworkId};
+use unicity_token::cbor::Decoder;
 use unicity_token::crypto::hash::sha256;
 use unicity_token::crypto::signature::PublicKey;
-use unicity_token::transaction::{CertifiedTransferTransaction, Token};
+use unicity_token::transaction::{CertifiedTransferTransaction, Token, Transaction};
 use unicity_token::verify::VerificationError;
 
 const FIXTURE: &str = include_str!("vectors/transition_flow.json");
@@ -58,16 +65,53 @@ fn token(name: &str) -> (Vec<u8>, Token) {
 
 #[test]
 fn decodes_and_roundtrips_byte_for_byte() {
-    for name in ["aliceToken", "bobToken", "carolToken"] {
+    for name in [
+        "aliceToken",
+        "bobToken",
+        "carolToken",
+        "explicitTimeoutToken",
+    ] {
         let (bytes, token) = token(name);
         assert_eq!(token.to_cbor(), bytes, "{name} did not round-trip");
     }
 }
 
+/// Both cases cross the SDK boundary: the default flow carries no deadline,
+/// and the explicit one carries a deadline the round's reference time
+/// is below.
+#[test]
+fn covers_present_and_absent_deadlines() {
+    let tb = trust_base();
+
+    let (_, default_token) = token("aliceToken");
+    assert_eq!(default_token.genesis().transaction().expires_at(), None);
+    default_token.verify(&tb).expect("absent deadline verifies");
+
+    let (_, explicit_token) = token("explicitTimeoutToken");
+    let genesis = explicit_token.genesis();
+    let timeout = genesis
+        .transaction()
+        .expires_at()
+        .expect("explicit deadline is present");
+    assert!(
+        genesis.reference_time() < timeout,
+        "certified reference time {} must precede the request deadline {timeout}",
+        genesis.reference_time()
+    );
+    explicit_token
+        .verify(&tb)
+        .expect("explicit deadline verifies");
+}
+
 #[test]
 fn verifies_against_trust_base() {
     let tb = trust_base();
-    for name in ["aliceToken", "bobToken", "carolToken"] {
+    for name in [
+        "aliceToken",
+        "bobToken",
+        "carolToken",
+        "explicitTimeoutToken",
+    ] {
         let (_, token) = token(name);
         token
             .verify(&tb)
@@ -187,10 +231,10 @@ fn rejects_trailing_and_non_minimal_token_encodings() {
 
     let (canonical, _) = token("aliceToken");
     // The token tag is three bytes and the following array header is one byte;
-    // replace canonical version 1 with its non-minimal two-byte form.
-    assert_eq!(canonical[4], 0x01);
+    // replace the canonical version with its non-minimal two-byte form.
+    assert_eq!(canonical[4], 0x02);
     let mut non_minimal = canonical[..4].to_vec();
-    non_minimal.extend_from_slice(&[0x18, 0x01]);
+    non_minimal.extend_from_slice(&[0x18, 0x02]);
     non_minimal.extend_from_slice(&canonical[5..]);
     assert!(Token::from_cbor(&non_minimal).is_err());
 }
@@ -200,16 +244,15 @@ fn rejects_mismatched_transfer_certification_state() {
     let (_, token) = token("bobToken");
     let certified = &token.transactions()[0];
     let mut proof = certified.inclusion_proof().clone();
-    let data = proof
-        .certification_data
-        .as_ref()
-        .expect("fixture has certification data");
-    proof.certification_data = Some(CertificationData::new(
+    let data = proof.certification_data.clone();
+    // Rebuild with the same fields, so only the substituted source state differs.
+    proof.certification_data = CertificationData::new(
         data.lock_script().clone(),
         sha256(b"unrelated source state"),
         data.transaction_hash().clone(),
         data.unlock_script().to_vec(),
-    ));
+        data.expires_at(),
+    );
 
     let forged = Token::new(
         token.genesis().clone(),
@@ -223,4 +266,39 @@ fn rejects_mismatched_transfer_certification_state() {
         Err(VerificationError::Transfer { source, .. })
             if matches!(*source, VerificationError::CertificationDataMismatch)
     ));
+}
+
+/// The aggregator's answer round-trips in both of the shapes the wire admits,
+/// and only the certified one yields a proof.
+#[test]
+fn inclusion_proof_response_round_trips_both_shapes() {
+    let (_, token) = token("carolToken");
+    let proof = token.transactions()[0].inclusion_proof().clone();
+
+    let certified = InclusionProofResponse::Certified {
+        block_number: 7,
+        proof: proof.clone(),
+    };
+    let bytes = certified.to_cbor();
+    let decoded = InclusionProofResponse::from_cbor(Decoder::new(&bytes)).expect("certified");
+    assert_eq!(decoded, certified);
+    assert_eq!(decoded.block_number(), 7);
+    assert_eq!(decoded.inclusion_proof(), Some(&proof));
+    assert_eq!(decoded.unicity_certificate(), &proof.unicity_certificate);
+
+    let not_certified = InclusionProofResponse::NotCertified {
+        block_number: 9,
+        unicity_certificate: proof.unicity_certificate.clone(),
+    };
+    let bytes = not_certified.to_cbor();
+    let decoded = InclusionProofResponse::from_cbor(Decoder::new(&bytes)).expect("not certified");
+    assert_eq!(decoded, not_certified);
+    assert_eq!(decoded.block_number(), 9);
+    assert_eq!(decoded.inclusion_proof(), None);
+    assert_eq!(decoded.unicity_certificate(), &proof.unicity_certificate);
+
+    // The uncertified body is not an InclusionProof, and says so rather than
+    // decoding into one with empty fields.
+    let items = Decoder::new(&bytes).array(Some(2)).unwrap();
+    assert!(unicity_token::api::InclusionProof::from_cbor(items[1]).is_err());
 }

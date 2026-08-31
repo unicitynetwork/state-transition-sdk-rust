@@ -1,7 +1,12 @@
 //! Certified transactions: a transaction bundled with its inclusion proof.
 //!
-//! These wrap [`MintTransaction`] / [`TransferTransaction`] and are *not* tagged
-//! — on the wire each is a 2-element array `[transaction, inclusionProof]`.
+//! These wrap [`MintTransaction`] / [`TransferTransaction`] and are *not* tagged.
+//! On the wire each value is a 3-element array
+//! `[transaction, referenceTime, inclusionProof]`.
+//!
+//! The reference time is fixed when the transaction is first bound to a proof
+//! and carried from then on: the tree is append-only, so a proof fetched later
+//! is issued against a later root and its input record carries a later time.
 
 use super::mint::MintTransaction;
 use super::transfer::TransferTransaction;
@@ -36,6 +41,14 @@ impl CertifiedMintTransaction {
     /// The inclusion proof.
     pub fn inclusion_proof(&self) -> &InclusionProof {
         &self.inclusion_proof
+    }
+    /// The reference time this transition was validated under.
+    ///
+    /// Read off the inclusion proof rather than stored beside it: the proof is
+    /// the only thing consensus certified, so a second copy could only ever
+    /// disagree with it.
+    pub fn reference_time(&self) -> u64 {
+        self.inclusion_proof.reference_time
     }
     /// The recipient predicate (lock script of the next state).
     pub fn recipient(&self) -> &EncodedPredicate {
@@ -84,6 +97,12 @@ impl CertifiedTransferTransaction {
     /// The inclusion proof.
     pub fn inclusion_proof(&self) -> &InclusionProof {
         &self.inclusion_proof
+    }
+    /// The reference time this transition was validated under.
+    ///
+    /// Read off the inclusion proof, for the same reason as on the genesis.
+    pub fn reference_time(&self) -> u64 {
+        self.inclusion_proof.reference_time
     }
     /// The recipient predicate (lock script of the next state).
     pub fn recipient(&self) -> &EncodedPredicate {

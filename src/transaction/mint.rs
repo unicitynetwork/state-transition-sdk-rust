@@ -16,7 +16,9 @@ use crate::predicate::EncodedPredicate;
 
 /// CBOR tag for [`MintTransaction`].
 pub const MINT_TRANSACTION_TAG: u64 = 39041;
-const VERSION: u64 = 1;
+/// The only accepted wire version. One version, one element count.
+pub const MINT_TRANSACTION_VERSION: u64 = 2;
+const FIELD_COUNT: usize = 8;
 
 /// A token mint transaction. The lock script, source (mint) state, and token id
 /// are *derived* from the network id and salt — never taken from the wire — so
@@ -25,6 +27,7 @@ const VERSION: u64 = 1;
 pub struct MintTransaction {
     network_id: NetworkId,
     recipient: EncodedPredicate,
+    expires_at: Option<u64>,
     salt: TokenSalt,
     token_type: TokenType,
     justification: Option<Vec<u8>>,
@@ -38,6 +41,7 @@ pub struct MintTransaction {
 impl MintTransaction {
     /// Build a mint transaction, deriving the token id, lock script, and mint
     /// state.
+    #[allow(clippy::too_many_arguments)]
     pub fn create(
         network_id: NetworkId,
         recipient: EncodedPredicate,
@@ -45,6 +49,7 @@ impl MintTransaction {
         salt: TokenSalt,
         data: Option<Vec<u8>>,
         justification: Option<Vec<u8>>,
+        expires_at: Option<u64>,
     ) -> Result<Self, Error> {
         let token_id = TokenId::derive(network_id, &salt);
         let lock_script = SignaturePredicate::new(Minter::public_key(&token_id)?).to_encoded();
@@ -52,6 +57,7 @@ impl MintTransaction {
         Ok(MintTransaction {
             network_id,
             recipient,
+            expires_at,
             salt,
             token_type,
             justification,
@@ -90,9 +96,8 @@ impl MintTransaction {
     /// Decode from CBOR (tagged), re-deriving the lock script / mint state.
     pub fn from_cbor(d: Decoder<'_>) -> Result<Self, Error> {
         let inner = d.expect_tag(MINT_TRANSACTION_TAG)?;
-        let items = inner.array(Some(7))?;
-        let version = items[0].uint()?;
-        if version != VERSION {
+        let items = inner.array(Some(FIELD_COUNT))?;
+        if items[0].uint()? != MINT_TRANSACTION_VERSION {
             return Err(Error::UnexpectedValue(
                 "unsupported MintTransaction version",
             ));
@@ -108,7 +113,16 @@ impl MintTransaction {
             items[5].nullable(|d| d.bytes_value().map(|b| b.to_vec()).map_err(Into::into))?;
         let data =
             items[6].nullable(|d| d.bytes_value().map(|b| b.to_vec()).map_err(Into::into))?;
-        MintTransaction::create(network_id, recipient, token_type, salt, data, justification)
+        let expires_at = items[7].nullable(|d| d.uint().map_err(Into::into))?;
+        MintTransaction::create(
+            network_id,
+            recipient,
+            token_type,
+            salt,
+            data,
+            justification,
+            expires_at,
+        )
     }
 }
 
@@ -125,6 +139,10 @@ impl Transaction for MintTransaction {
         self.source_state.hash()
     }
 
+    fn expires_at(&self) -> Option<u64> {
+        self.expires_at
+    }
+
     fn calculate_state_hash(&self) -> DataHash {
         // stateMask for a mint is the token id bytes.
         sha256(&encode_array(&[
@@ -134,17 +152,16 @@ impl Transaction for MintTransaction {
     }
 
     fn to_cbor(&self) -> Vec<u8> {
-        encode_tag(
-            MINT_TRANSACTION_TAG,
-            &encode_array(&[
-                &encode_uint(VERSION),
-                &encode_uint(self.network_id.id() as u64),
-                &self.recipient.to_cbor(),
-                &self.salt.to_cbor(),
-                &self.token_type.to_cbor(),
-                &encode_nullable(self.justification.as_ref(), |v| encode_byte_string(v)),
-                &encode_nullable(self.data.as_ref(), |v| encode_byte_string(v)),
-            ]),
-        )
+        let payload = encode_array(&[
+            &encode_uint(MINT_TRANSACTION_VERSION),
+            &encode_uint(self.network_id.id() as u64),
+            &self.recipient.to_cbor(),
+            &self.salt.to_cbor(),
+            &self.token_type.to_cbor(),
+            &encode_nullable(self.justification.as_ref(), |v| encode_byte_string(v)),
+            &encode_nullable(self.data.as_ref(), |v| encode_byte_string(v)),
+            &encode_nullable(self.expires_at.as_ref(), |v| encode_uint(*v)),
+        ]);
+        encode_tag(MINT_TRANSACTION_TAG, &payload)
     }
 }

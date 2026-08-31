@@ -58,14 +58,14 @@ pub enum VerificationError {
     SplitSourceAmountMismatch,
     /// The burned token was not locked to the split manifest's burn predicate.
     SplitBurnPredicateMismatch,
-    /// The inclusion proof had no inclusion certificate.
-    InclusionCertificateMissing,
-    /// The inclusion proof had no certification data.
-    CertificationDataMissing,
     /// Certification fields do not match the reconstructed transaction state.
     CertificationDataMismatch,
     /// The certified transaction hash does not match the recomputed one.
     TransactionHashMismatch,
+    /// The inclusion proof's reference time differs from the one the transition carries.
+    ReferenceTimeMismatch,
+    /// The round's reference time had already reached the request's timeout.
+    RequestExpired,
     /// The sparse-Merkle-tree path did not reproduce the expected root.
     PathInvalid,
     /// The non-inclusion certificate did not authenticate against the certified root.
@@ -168,14 +168,14 @@ impl fmt::Display for VerificationError {
                     "burned token not locked to split manifest burn predicate"
                 )
             }
-            VerificationError::InclusionCertificateMissing => {
-                write!(f, "inclusion certificate missing")
-            }
-            VerificationError::CertificationDataMissing => write!(f, "certification data missing"),
             VerificationError::CertificationDataMismatch => {
                 write!(f, "certification data does not match transaction state")
             }
             VerificationError::TransactionHashMismatch => write!(f, "transaction hash mismatch"),
+            VerificationError::ReferenceTimeMismatch => {
+                write!(f, "inclusion proof reference time mismatch")
+            }
+            VerificationError::RequestExpired => write!(f, "certification request expired"),
             VerificationError::PathInvalid => write!(f, "inclusion path invalid"),
             VerificationError::NonInclusionCertificateInvalid => {
                 write!(f, "non-inclusion certificate invalid")

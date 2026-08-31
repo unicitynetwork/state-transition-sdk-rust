@@ -102,6 +102,7 @@ fn mint_split_output(
         out.salt.clone(),
         Some(out.assets.to_cbor()),
         Some(justification.to_cbor()),
+        /* expires_at */ None,
     )
     .expect("build split output mint");
 
@@ -116,7 +117,6 @@ fn mint_split_output(
     let proof = aggregator
         .get_inclusion_proof(&state_id)
         .expect("split output inclusion proof");
-
     let token = Token::new(
         CertifiedMintTransaction::new(transaction, proof),
         Vec::new(),
@@ -177,6 +177,7 @@ fn main() {
         TokenSalt::random().expect("salt"),
         Some(source_payment.to_cbor()),
         None,
+        /* expires_at */ None,
     )
     .expect("mint source coin");
 
@@ -213,6 +214,7 @@ fn main() {
         PaymentAssetCollection::from_cbor_bytes,
         requests,
         Some(BURN_STATE_MASK),
+        /* expires_at */ None,
     )
     .expect("build split");
 
@@ -227,6 +229,7 @@ fn main() {
         &alice,
         StateMask::from_bytes(BURN_STATE_MASK),
         Some(split.burn.manifest.clone()),
+        /* expires_at */ None,
     )
     .expect("burn source coin");
 
