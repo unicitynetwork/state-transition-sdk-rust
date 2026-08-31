@@ -29,6 +29,13 @@ jobs:
         run: cargo test --all-features
       - name: Test (no default features, verification core)
         run: cargo test --no-default-features --features alloc
+      - name: Demo crate (own workspace, so nothing above reaches it)
+        # e2e/ declares its own [workspace], so the root build never compiles it
+        # and its lockfile drifts from the SDK's silently.
+        run: |
+          cargo fmt --manifest-path e2e/Cargo.toml --check
+          cargo clippy --manifest-path e2e/Cargo.toml --all-targets -- -D warnings
+          cargo build --manifest-path e2e/Cargo.toml --locked
 
   no_std:
     name: no_std / wasm guest core
