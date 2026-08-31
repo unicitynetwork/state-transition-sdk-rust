@@ -2,7 +2,7 @@ use std::env;
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use unicity_token::api::bft::RootTrustBase;
 use unicity_token::cbor::encode_text_string;
@@ -15,6 +15,10 @@ use unicity_token::transaction::Token;
 const DEFAULT_GATEWAY: &str = "https://gateway.testnet2.unicity.network/";
 const DEFAULT_TRUSTBASE: &str = "bft-trustbase.testnet2.json";
 const DEFAULT_OUTPUT_DIR: &str = "artifacts";
+
+fn request_timeout() -> Result<u64, Box<dyn Error>> {
+    Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() + 3600)
+}
 
 fn main() -> Result<(), Box<dyn Error>> {
     // Load local development configuration without overriding variables that
@@ -56,6 +60,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         TokenSalt::random()?,
         Some(encode_text_string("Rust SDK live e2e mint")),
         None,
+        Some(request_timeout()?),
     )?;
 
     let minted_path = config.output_dir.join("token-minted.cbor");
@@ -73,6 +78,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         &alice,
         StateMask::random()?,
         Some(encode_text_string("Rust SDK live e2e transfer")),
+        Some(request_timeout()?),
     )?;
 
     let transferred_path = config.output_dir.join("token-transferred.cbor");

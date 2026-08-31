@@ -1,11 +1,11 @@
 [package]
 name = "unicity-token"
-version = "0.1.0"
+version = "3.0.1"
 edition = "2021"
 rust-version = "1.81"
 description = "Clean-room Rust SDK for the Unicity token state-transition protocol, binary-compatible with the Java and TypeScript SDKs. no_std-first, zkVM/WASM friendly."
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/unicitynetwork/state-transition-sdk-rs"
+repository = "https://github.com/unicitynetwork/state-transition-sdk-rust"
 categories = ["cryptography", "no-std"]
 keywords = ["unicity", "token", "zkvm", "cbor", "secp256k1"]
 # Internal design doc; not part of the published API surface.

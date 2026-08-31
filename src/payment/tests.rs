@@ -19,6 +19,7 @@ use crate::api::bft::{
     InputRecord, RootTrustBase, RootTrustBaseNodeInfo, ShardId, ShardTreeCertificate,
     UnicityCertificate, UnicitySeal, UnicityTreeCertificate,
 };
+use crate::api::calculate_leaf_value;
 use crate::api::inclusion_proof::InclusionProof;
 use crate::api::{CertificationData, InclusionCertificate, NetworkId, StateId};
 use crate::crypto::hash::{sha256, DataHash};
@@ -36,6 +37,11 @@ use crate::verify::{
     verify_token_with_policy, MintJustificationRegistry, VerificationError, VerificationLimits,
     VerificationPolicy,
 };
+
+/// Reference time every fixture in this module certifies under.
+const REFERENCE_TIME: u64 = 1755000000;
+/// Exclusive certification request timeout every fixture in this module uses.
+const TIMEOUT: u64 = 1755003600;
 
 // --- proof construction (mirrors the verify-engine test harness) -----------
 
@@ -126,17 +132,19 @@ fn valid_proof(
 ) -> InclusionProof {
     let tx_hash = transaction.calculate_transaction_hash();
     let state_id = StateId::derive(transaction.lock_script(), transaction.source_state_hash());
-    let root = leaf_root(&state_id, &tx_hash);
+    let root = leaf_root(&state_id, &calculate_leaf_value(&tx_hash, REFERENCE_TIME));
     let unlock = sign_signature_unlock(owner, transaction.source_state_hash(), &tx_hash);
     let certification_data = CertificationData::new(
         transaction.lock_script().clone(),
         transaction.source_state_hash().clone(),
         tx_hash,
         unlock,
+        Some(transaction.expires_at().expect("explicit timeout fixture")),
     );
     InclusionProof {
-        certification_data: Some(certification_data),
-        inclusion_certificate: Some(InclusionCertificate::decode(&[0u8; 32]).unwrap()),
+        certification_data,
+        reference_time: REFERENCE_TIME,
+        inclusion_certificate: InclusionCertificate::decode(&[0u8; 32]).unwrap(),
         unicity_certificate: signed_uc(node, root),
     }
 }
@@ -170,6 +178,7 @@ fn source_token(node: &Secp256k1Signer, owner: &Secp256k1Signer) -> Token {
         TokenSalt::from_bytes([0x01; 32]),
         Some(payment.to_cbor()),
         None,
+        Some(TIMEOUT),
     )
     .unwrap();
     let minter = Minter::signer(mint.token_id()).unwrap();
@@ -208,6 +217,7 @@ fn mint_output(
         salt,
         Some(assets.to_cbor()),
         Some(justification.to_cbor()),
+        Some(TIMEOUT),
     )
     .unwrap();
     let minter = Minter::signer(mint.token_id()).unwrap();
@@ -322,6 +332,7 @@ fn forged_output_with_type(
         burn_predicate.to_encoded(),
         vec![9u8; 32],
         Some(manifest.to_cbor()),
+        Some(TIMEOUT),
     );
     let burned = burned_token(&s.source, burn, &s.alice, &s.node);
     let justification = SplitMintJustification::create(burned, vec![proof]).unwrap();
@@ -362,6 +373,7 @@ fn split_outputs_verify_end_to_end() {
         PaymentAssetCollection::from_cbor_bytes,
         s.requests,
         Some([7u8; 32]),
+        Some(TIMEOUT),
     )
     .unwrap();
 
@@ -448,6 +460,7 @@ fn recursive_split_verification_honors_shared_depth_limit() {
         PaymentAssetCollection::from_cbor_bytes,
         s.requests,
         Some([7u8; 32]),
+        Some(TIMEOUT),
     )
     .unwrap();
     let burned = burned_token(&s.source, split.burn.transaction.clone(), &s.alice, &s.node);
@@ -511,6 +524,7 @@ fn rejects_tampered_output_amount() {
         PaymentAssetCollection::from_cbor_bytes,
         s.requests,
         Some([7u8; 32]),
+        Some(TIMEOUT),
     )
     .unwrap();
     let burned = burned_token(&s.source, split.burn.transaction.clone(), &s.alice, &s.node);
@@ -549,6 +563,7 @@ fn rejects_dropped_proof() {
         PaymentAssetCollection::from_cbor_bytes,
         s.requests,
         Some([7u8; 32]),
+        Some(TIMEOUT),
     )
     .unwrap();
     let burned = burned_token(&s.source, split.burn.transaction.clone(), &s.alice, &s.node);
@@ -583,6 +598,7 @@ fn rejects_wrong_burn_predicate() {
         PaymentAssetCollection::from_cbor_bytes,
         s.requests,
         Some([7u8; 32]),
+        Some(TIMEOUT),
     )
     .unwrap();
     let registry = registry();
@@ -596,6 +612,7 @@ fn rejects_wrong_burn_predicate() {
         BurnPredicate::new(b"not-the-manifest-hash".to_vec()).to_encoded(),
         vec![7u8; 32],
         Some(split.burn.manifest.clone()),
+        Some(TIMEOUT),
     );
     let burned = burned_token(&s.source, wrong_burn, &s.alice, &s.node);
     assert_eq!(
@@ -643,6 +660,7 @@ fn rejects_missing_manifest() {
         PaymentAssetCollection::from_cbor_bytes,
         s.requests,
         Some([7u8; 32]),
+        Some(TIMEOUT),
     )
     .unwrap();
     // Burn with no auxiliary manifest data at all.
@@ -653,6 +671,7 @@ fn rejects_missing_manifest() {
         BurnPredicate::new(b"x".to_vec()).to_encoded(),
         vec![3u8; 32],
         None,
+        Some(TIMEOUT),
     );
     let burned = burned_token(&s.source, burn, &s.alice, &s.node);
     let out = &split.tokens[0];
@@ -682,6 +701,7 @@ fn rejects_manifest_length_mismatch() {
         PaymentAssetCollection::from_cbor_bytes,
         s.requests,
         Some([7u8; 32]),
+        Some(TIMEOUT),
     )
     .unwrap();
     // A self-consistent burn whose manifest has one root, although the source
@@ -694,6 +714,7 @@ fn rejects_manifest_length_mismatch() {
         BurnPredicate::new(short.reason_hash().to_vec()).to_encoded(),
         vec![4u8; 32],
         Some(short.to_cbor()),
+        Some(TIMEOUT),
     );
     let burned = burned_token(&s.source, burn, &s.alice, &s.node);
     let out = &split.tokens[0];
@@ -733,6 +754,7 @@ fn rejects_wrong_output_token_type() {
         PaymentAssetCollection::from_cbor_bytes,
         bad,
         Some([7u8; 32]),
+        Some(TIMEOUT)
     )
     .is_err());
 }
@@ -757,6 +779,7 @@ fn rejects_unbalanced_split_at_build_time() {
         PaymentAssetCollection::from_cbor_bytes,
         bad,
         Some([7u8; 32]),
+        Some(TIMEOUT)
     )
     .is_err());
 }

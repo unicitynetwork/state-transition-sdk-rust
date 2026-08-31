@@ -64,6 +64,7 @@ fn main() {
         TokenSalt::random().expect("salt"),
         Some(encode_text_string("My custom data")),
         None,
+        /* expires_at */ None,
     )
     .expect("mint");
 
@@ -82,6 +83,7 @@ fn main() {
         &alice,
         StateMask::random().expect("state mask"),
         Some(encode_text_string("My custom transfer data")),
+        /* expires_at */ None,
     )
     .expect("transfer");
 

@@ -18,7 +18,8 @@ use crate::predicate::EncodedPredicate;
 
 /// CBOR tag for [`TransferTransaction`].
 pub const TRANSFER_TRANSACTION_TAG: u64 = 39045;
-const VERSION: u64 = 1;
+pub const TRANSFER_TRANSACTION_VERSION: u64 = 2;
+const FIELD_COUNT: usize = 5;
 
 /// A token transfer transaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +29,7 @@ pub struct TransferTransaction {
     lock_script: EncodedPredicate,
     // On the wire:
     recipient: EncodedPredicate,
+    expires_at: Option<u64>,
     state_mask: Vec<u8>,
     data: Option<Vec<u8>>,
 }
@@ -42,11 +44,13 @@ impl TransferTransaction {
         recipient: EncodedPredicate,
         state_mask: Vec<u8>,
         data: Option<Vec<u8>>,
+        expires_at: Option<u64>,
     ) -> Self {
         TransferTransaction {
             source_state_hash,
             lock_script,
             recipient,
+            expires_at,
             state_mask,
             data,
         }
@@ -70,9 +74,8 @@ impl TransferTransaction {
         lock_script: EncodedPredicate,
     ) -> Result<Self, Error> {
         let inner = d.expect_tag(TRANSFER_TRANSACTION_TAG)?;
-        let items = inner.array(Some(4))?;
-        let version = items[0].uint()?;
-        if version != VERSION {
+        let items = inner.array(Some(FIELD_COUNT))?;
+        if items[0].uint()? != TRANSFER_TRANSACTION_VERSION {
             return Err(Error::UnexpectedValue(
                 "unsupported TransferTransaction version",
             ));
@@ -81,12 +84,14 @@ impl TransferTransaction {
         let state_mask = items[2].bytes_value()?.to_vec();
         let data =
             items[3].nullable(|d| d.bytes_value().map(|b| b.to_vec()).map_err(Into::into))?;
+        let expires_at = items[4].nullable(|d| d.uint().map_err(Into::into))?;
         Ok(TransferTransaction::new(
             source_state_hash,
             lock_script,
             recipient,
             state_mask,
             data,
+            expires_at,
         ))
     }
 }
@@ -104,6 +109,10 @@ impl Transaction for TransferTransaction {
         &self.source_state_hash
     }
 
+    fn expires_at(&self) -> Option<u64> {
+        self.expires_at
+    }
+
     fn calculate_state_hash(&self) -> DataHash {
         sha256(&encode_array(&[
             &encode_byte_string(&self.source_state_hash.imprint()),
@@ -112,14 +121,13 @@ impl Transaction for TransferTransaction {
     }
 
     fn to_cbor(&self) -> Vec<u8> {
-        encode_tag(
-            TRANSFER_TRANSACTION_TAG,
-            &encode_array(&[
-                &encode_uint(VERSION),
-                &self.recipient.to_cbor(),
-                &encode_byte_string(&self.state_mask),
-                &encode_nullable(self.data.as_ref(), |v| encode_byte_string(v)),
-            ]),
-        )
+        let payload = encode_array(&[
+            &encode_uint(TRANSFER_TRANSACTION_VERSION),
+            &self.recipient.to_cbor(),
+            &encode_byte_string(&self.state_mask),
+            &encode_nullable(self.data.as_ref(), |v| encode_byte_string(v)),
+            &encode_nullable(self.expires_at.as_ref(), |v| encode_uint(*v)),
+        ]);
+        encode_tag(TRANSFER_TRANSACTION_TAG, &payload)
     }
 }

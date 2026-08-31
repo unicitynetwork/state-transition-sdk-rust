@@ -116,7 +116,7 @@ pub fn certification_data_for(
     CertificationData::from_transaction(transaction, unlock)
 }
 
-/// Mint a new token to `recipient` and return the verified [`Token`].
+/// Mint a new token and return the verified [`Token`].
 #[allow(clippy::too_many_arguments)]
 pub fn mint<A: AggregatorClient>(
     aggregator: &A,
@@ -127,6 +127,7 @@ pub fn mint<A: AggregatorClient>(
     salt: TokenSalt,
     data: Option<Vec<u8>>,
     justification: Option<Vec<u8>>,
+    expires_at: Option<u64>,
 ) -> Result<Token, ClientError<A::Error>> {
     trust_base
         .validate()
@@ -141,6 +142,7 @@ pub fn mint<A: AggregatorClient>(
         salt,
         data,
         justification,
+        expires_at,
     )?;
 
     // The genesis is unlocked by the deterministic minter key for the token id.
@@ -154,7 +156,6 @@ pub fn mint<A: AggregatorClient>(
     let proof = aggregator
         .get_inclusion_proof(&state_id)
         .map_err(ClientError::Aggregator)?;
-
     let token = Token::new(
         CertifiedMintTransaction::new(transaction, proof),
         Vec::new(),
@@ -165,6 +166,7 @@ pub fn mint<A: AggregatorClient>(
 
 /// Transfer `token` to `recipient`, authorised by `signer` (the current
 /// owner's key), and return the verified successor [`Token`].
+#[allow(clippy::too_many_arguments)]
 pub fn transfer<A: AggregatorClient>(
     aggregator: &A,
     trust_base: &RootTrustBase,
@@ -173,6 +175,7 @@ pub fn transfer<A: AggregatorClient>(
     signer: &impl Signer,
     state_mask: StateMask,
     data: Option<Vec<u8>>,
+    expires_at: Option<u64>,
 ) -> Result<Token, ClientError<A::Error>> {
     // Reject an untrusted or stale input before causing any aggregator side
     // effect. The successor is verified again below as defense in depth.
@@ -184,6 +187,7 @@ pub fn transfer<A: AggregatorClient>(
         EncodedPredicate::from_predicate(recipient),
         state_mask.bytes().to_vec(),
         data,
+        expires_at,
     );
 
     let certification_data = certification_data_for(&transaction, signer);
@@ -195,7 +199,6 @@ pub fn transfer<A: AggregatorClient>(
     let proof = aggregator
         .get_inclusion_proof(&state_id)
         .map_err(ClientError::Aggregator)?;
-
     let mut transactions = token.transactions().to_vec();
     transactions.push(CertifiedTransferTransaction::new(transaction, proof));
     let next = Token::new(token.genesis().clone(), transactions);
@@ -206,6 +209,9 @@ pub fn transfer<A: AggregatorClient>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Exclusive certification request deadline used by these tests.
+    const TIMEOUT: u64 = 1755000000;
     use crate::crypto::signature::PublicKey;
     use crate::predicate::builtin::SignaturePredicate;
     use core::cell::RefCell;
@@ -270,6 +276,7 @@ mod tests {
             TokenSalt::from_bytes([0u8; 32]),
             None,
             None,
+            Some(TIMEOUT),
         )
         .unwrap_err();
         assert_eq!(err, ClientError::Aggregator("no proof in mock"));
@@ -278,7 +285,7 @@ mod tests {
         assert_eq!(
             captured,
             hex!(
-                "d998778501d9987883014101582103a19eef04b8856f50bf2d688b0d8804575115e53d2a7780da363628343f9635075820e4b183ff6b7a399983cee26e4feea85d517dede0142def5c838e593a9e6152415820df524cffc08a1dc30579a8a51f440a97b30630988084f8d12a4d8bd741c7791258419efb637f14dbdaada6e293e2182932d82265b04b1abf4f28bc4c285b32b5e2325140fe7f94bc9b705c568b4fcb7f9ea90cf0fadcacc1b4504275f81558aad1e700"
+                "d998778602d9987883014101582103a19eef04b8856f50bf2d688b0d8804575115e53d2a7780da363628343f9635075820e4b183ff6b7a399983cee26e4feea85d517dede0142def5c838e593a9e6152415820ed275ff0a0694d1b61ec22f13914a431569220ba7f2f043d7940aac78d02c2f91a689b2cc0584111f0f7929d70e0e32db9159b7e23b6e0043502bc36609728e9dc0353251c241a7b1adb047c9234cd77ed519c409048a6c8bc247f0262c1f161b03d6fee49426e00"
             )
         );
     }

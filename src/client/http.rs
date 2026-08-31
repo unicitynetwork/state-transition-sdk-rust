@@ -18,7 +18,7 @@ use zeroize::Zeroize;
 
 use crate::api::certification_request::CertificationRequest;
 use crate::api::inclusion_proof::InclusionProof;
-use crate::api::{CertificationData, NonInclusionProof, StateId};
+use crate::api::{CertificationData, InclusionProofResponse, NonInclusionProof, StateId};
 use crate::cbor::Decoder;
 
 use super::{AggregatorClient, MembershipStatus, NonInclusionAggregatorClient};
@@ -26,8 +26,14 @@ use super::{AggregatorClient, MembershipStatus, NonInclusionAggregatorClient};
 const MAX_RESPONSE_BODY_BYTES: usize = 8 * 1024 * 1024;
 const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
 const MAX_PROOF_HEX_CHARS: usize = MAX_RESPONSE_BODY_BYTES - 1024;
-const RPC_STATE_INCLUDED: i64 = -32002;
-const RPC_INCLUSION_PENDING: i64 = -32003;
+// Shared proof-lookup states. JSON-RPC 2.0 reserves -32000..-32099 for
+// implementation-defined server errors; the Unicity aggregators keep
+// -32000..-32019 for implementation-private codes (aggregator-go allocates
+// -32000..-32006 there) and -32020..-32039 for these, which describe the
+// protocol rather than one server.
+const RPC_STATE_NOT_FOUND: i64 = -32020;
+const RPC_INCLUSION_PENDING: i64 = -32021;
+const RPC_STATE_INCLUDED: i64 = -32022;
 
 /// Errors from the HTTP aggregator client.
 #[derive(Debug)]
@@ -341,16 +347,10 @@ fn decode_rpc_response(text: &str, expected_id: &str) -> Result<serde_json::Valu
 }
 
 /// Decode the `[blockNumber, InclusionProof]` response payload.
-fn decode_inclusion_proof_response(bytes: &[u8]) -> Result<InclusionProof, HttpError> {
+fn decode_inclusion_proof_response(bytes: &[u8]) -> Result<InclusionProofResponse, HttpError> {
     let d = Decoder::new(bytes);
     d.finish().map_err(|e| HttpError::Decode(e.to_string()))?;
-    let items = d
-        .array(Some(2))
-        .map_err(|e| HttpError::Decode(e.to_string()))?;
-    items[0]
-        .uint()
-        .map_err(|e| HttpError::Decode(e.to_string()))?;
-    InclusionProof::from_cbor(items[1]).map_err(|e| HttpError::Decode(e.to_string()))
+    InclusionProofResponse::from_cbor(d).map_err(|e| HttpError::Decode(e.to_string()))
 }
 
 /// Decode the `[blockNumber, NonInclusionProof]` response payload.
@@ -402,6 +402,9 @@ impl AggregatorClient for HttpAggregatorClient {
                     }
                     continue;
                 }
+                Err(HttpError::Rpc { code, .. }) if code == RPC_STATE_NOT_FOUND => {
+                    return Err(HttpError::StateNotFound);
+                }
                 Err(HttpError::Http { status: 404, .. }) => {
                     return Err(HttpError::StateNotFound);
                 }
@@ -416,14 +419,23 @@ impl AggregatorClient for HttpAggregatorClient {
                 });
             }
             let bytes = hex::decode(encoded).map_err(|e| HttpError::Decode(e.to_string()))?;
-            let proof = decode_inclusion_proof_response(&bytes)?;
 
-            if proof.certification_data.is_none() || proof.inclusion_certificate.is_none() {
-                return Err(HttpError::Decode(
-                    "inclusion proof is missing required relation data".to_string(),
-                ));
+            // A response carrying no proof on this method means the leaf is not
+            // certified yet. `get_inclusion_proof.v2` never answers with a
+            // non-inclusion proof (that is `get_non_inclusion_proof.v1`), so the
+            // uncertified response is unambiguous and is aggregator-go's way of
+            // reporting pending. An aggregator that sends the explicit
+            // INCLUSION_PENDING code above never reaches this branch, and only
+            // that one lets the client tell "not yet" apart from "no such state".
+            match decode_inclusion_proof_response(&bytes)? {
+                InclusionProofResponse::Certified { proof, .. } => return Ok(proof),
+                InclusionProofResponse::NotCertified { .. } => {
+                    if attempt + 1 < self.poll_attempts {
+                        std::thread::sleep(self.poll_interval);
+                    }
+                    continue;
+                }
             }
-            return Ok(proof);
         }
         Err(HttpError::Timeout)
     }
