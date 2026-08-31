@@ -58,16 +58,11 @@ pub enum VerificationError {
     SplitSourceAmountMismatch,
     /// The burned token was not locked to the split manifest's burn predicate.
     SplitBurnPredicateMismatch,
-    /// The inclusion proof had no inclusion certificate.
-    InclusionCertificateMissing,
-    /// The inclusion proof had no certification data.
-    CertificationDataMissing,
     /// Certification fields do not match the reconstructed transaction state.
     CertificationDataMismatch,
     /// The certified transaction hash does not match the recomputed one.
     TransactionHashMismatch,
     /// The inclusion proof's reference time differs from the one the transition carries.
-    /// An absent reference time also lands here, since it cannot match.
     ReferenceTimeMismatch,
     /// The round's reference time had already reached the request's timeout.
     RequestExpired,
@@ -173,10 +168,6 @@ impl fmt::Display for VerificationError {
                     "burned token not locked to split manifest burn predicate"
                 )
             }
-            VerificationError::InclusionCertificateMissing => {
-                write!(f, "inclusion certificate missing")
-            }
-            VerificationError::CertificationDataMissing => write!(f, "certification data missing"),
             VerificationError::CertificationDataMismatch => {
                 write!(f, "certification data does not match transaction state")
             }

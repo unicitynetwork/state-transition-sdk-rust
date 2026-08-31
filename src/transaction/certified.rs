@@ -12,7 +12,7 @@ use super::mint::MintTransaction;
 use super::transfer::TransferTransaction;
 use super::Transaction;
 use crate::api::inclusion_proof::InclusionProof;
-use crate::cbor::{encode_array, encode_uint, Decoder};
+use crate::cbor::{encode_array, Decoder};
 use crate::crypto::hash::DataHash;
 use crate::error::Error;
 use crate::predicate::EncodedPredicate;
@@ -21,7 +21,6 @@ use crate::predicate::EncodedPredicate;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CertifiedMintTransaction {
     transaction: MintTransaction,
-    reference_time: u64,
     inclusion_proof: InclusionProof,
 }
 
@@ -29,10 +28,8 @@ impl CertifiedMintTransaction {
     /// Bundle a transaction with a proof (no verification — see
     /// [`Token::verify`](super::token::Token::verify)).
     pub fn new(transaction: MintTransaction, inclusion_proof: InclusionProof) -> Self {
-        let reference_time = inclusion_proof.reference_time.unwrap_or(0);
         CertifiedMintTransaction {
             transaction,
-            reference_time,
             inclusion_proof,
         }
     }
@@ -46,8 +43,12 @@ impl CertifiedMintTransaction {
         &self.inclusion_proof
     }
     /// The reference time this transition was validated under.
+    ///
+    /// Read off the inclusion proof rather than stored beside it: the proof is
+    /// the only thing consensus certified, so a second copy could only ever
+    /// disagree with it.
     pub fn reference_time(&self) -> u64 {
-        self.reference_time
+        self.inclusion_proof.reference_time
     }
     /// The recipient predicate (lock script of the next state).
     pub fn recipient(&self) -> &EncodedPredicate {
@@ -58,30 +59,18 @@ impl CertifiedMintTransaction {
         self.transaction.calculate_state_hash()
     }
 
-    /// Decode from CBOR (3-element array).
+    /// Decode from CBOR (2-element array).
     pub fn from_cbor(d: Decoder<'_>) -> Result<Self, Error> {
-        let items = d.array(Some(3))?;
-        let reference_time = items[1].uint()?;
-        let inclusion_proof = InclusionProof::from_cbor(items[2])?;
-        if inclusion_proof.reference_time != Some(reference_time) {
-            return Err(Error::UnexpectedValue(
-                "certified mint reference time mismatch",
-            ));
-        }
+        let items = d.array(Some(2))?;
         Ok(CertifiedMintTransaction {
             transaction: MintTransaction::from_cbor(items[0])?,
-            reference_time,
-            inclusion_proof,
+            inclusion_proof: InclusionProof::from_cbor(items[1])?,
         })
     }
 
-    /// Encode to CBOR (3-element array).
+    /// Encode to CBOR (2-element array).
     pub fn to_cbor(&self) -> alloc::vec::Vec<u8> {
-        encode_array(&[
-            &self.transaction.to_cbor(),
-            &encode_uint(self.reference_time),
-            &self.inclusion_proof.to_cbor(),
-        ])
+        encode_array(&[&self.transaction.to_cbor(), &self.inclusion_proof.to_cbor()])
     }
 }
 
@@ -89,17 +78,14 @@ impl CertifiedMintTransaction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CertifiedTransferTransaction {
     transaction: TransferTransaction,
-    reference_time: u64,
     inclusion_proof: InclusionProof,
 }
 
 impl CertifiedTransferTransaction {
     /// Bundle a transaction with a proof (no verification).
     pub fn new(transaction: TransferTransaction, inclusion_proof: InclusionProof) -> Self {
-        let reference_time = inclusion_proof.reference_time.unwrap_or(0);
         CertifiedTransferTransaction {
             transaction,
-            reference_time,
             inclusion_proof,
         }
     }
@@ -113,8 +99,10 @@ impl CertifiedTransferTransaction {
         &self.inclusion_proof
     }
     /// The reference time this transition was validated under.
+    ///
+    /// Read off the inclusion proof, for the same reason as on the genesis.
     pub fn reference_time(&self) -> u64 {
-        self.reference_time
+        self.inclusion_proof.reference_time
     }
     /// The recipient predicate (lock script of the next state).
     pub fn recipient(&self) -> &EncodedPredicate {
@@ -125,34 +113,22 @@ impl CertifiedTransferTransaction {
         self.transaction.calculate_state_hash()
     }
 
-    /// Decode from CBOR (3-element array), reconstructing the transfer's source
+    /// Decode from CBOR (2-element array), reconstructing the transfer's source
     /// state hash and lock script from the previous transaction.
     pub fn from_cbor(
         d: Decoder<'_>,
         source_state_hash: DataHash,
         lock_script: EncodedPredicate,
     ) -> Result<Self, Error> {
-        let items = d.array(Some(3))?;
-        let reference_time = items[1].uint()?;
-        let inclusion_proof = InclusionProof::from_cbor(items[2])?;
-        if inclusion_proof.reference_time != Some(reference_time) {
-            return Err(Error::UnexpectedValue(
-                "certified transfer reference time mismatch",
-            ));
-        }
+        let items = d.array(Some(2))?;
         Ok(CertifiedTransferTransaction {
             transaction: TransferTransaction::from_cbor(items[0], source_state_hash, lock_script)?,
-            reference_time,
-            inclusion_proof,
+            inclusion_proof: InclusionProof::from_cbor(items[1])?,
         })
     }
 
-    /// Encode to CBOR (3-element array).
+    /// Encode to CBOR (2-element array).
     pub fn to_cbor(&self) -> alloc::vec::Vec<u8> {
-        encode_array(&[
-            &self.transaction.to_cbor(),
-            &encode_uint(self.reference_time),
-            &self.inclusion_proof.to_cbor(),
-        ])
+        encode_array(&[&self.transaction.to_cbor(), &self.inclusion_proof.to_cbor()])
     }
 }

@@ -17,7 +17,8 @@
 
 use unicity_token::api::bft::root_trust_base::RootTrustBaseNodeInfo;
 use unicity_token::api::bft::RootTrustBase;
-use unicity_token::api::{CertificationData, NetworkId};
+use unicity_token::api::{CertificationData, InclusionProofResponse, NetworkId};
+use unicity_token::cbor::Decoder;
 use unicity_token::crypto::hash::sha256;
 use unicity_token::crypto::signature::PublicKey;
 use unicity_token::transaction::{CertifiedTransferTransaction, Token, Transaction};
@@ -230,10 +231,10 @@ fn rejects_trailing_and_non_minimal_token_encodings() {
 
     let (canonical, _) = token("aliceToken");
     // The token tag is three bytes and the following array header is one byte;
-    // replace canonical version 1 with its non-minimal two-byte form.
-    assert_eq!(canonical[4], 0x01);
+    // replace the canonical version with its non-minimal two-byte form.
+    assert_eq!(canonical[4], 0x02);
     let mut non_minimal = canonical[..4].to_vec();
-    non_minimal.extend_from_slice(&[0x18, 0x01]);
+    non_minimal.extend_from_slice(&[0x18, 0x02]);
     non_minimal.extend_from_slice(&canonical[5..]);
     assert!(Token::from_cbor(&non_minimal).is_err());
 }
@@ -243,18 +244,15 @@ fn rejects_mismatched_transfer_certification_state() {
     let (_, token) = token("bobToken");
     let certified = &token.transactions()[0];
     let mut proof = certified.inclusion_proof().clone();
-    let data = proof
-        .certification_data
-        .as_ref()
-        .expect("fixture has certification data");
+    let data = proof.certification_data.clone();
     // Rebuild with the same fields, so only the substituted source state differs.
-    proof.certification_data = Some(CertificationData::new(
+    proof.certification_data = CertificationData::new(
         data.lock_script().clone(),
         sha256(b"unrelated source state"),
         data.transaction_hash().clone(),
         data.unlock_script().to_vec(),
         data.expires_at(),
-    ));
+    );
 
     let forged = Token::new(
         token.genesis().clone(),
@@ -268,4 +266,39 @@ fn rejects_mismatched_transfer_certification_state() {
         Err(VerificationError::Transfer { source, .. })
             if matches!(*source, VerificationError::CertificationDataMismatch)
     ));
+}
+
+/// The aggregator's answer round-trips in both of the shapes the wire admits,
+/// and only the certified one yields a proof.
+#[test]
+fn inclusion_proof_response_round_trips_both_shapes() {
+    let (_, token) = token("carolToken");
+    let proof = token.transactions()[0].inclusion_proof().clone();
+
+    let certified = InclusionProofResponse::Certified {
+        block_number: 7,
+        proof: proof.clone(),
+    };
+    let bytes = certified.to_cbor();
+    let decoded = InclusionProofResponse::from_cbor(Decoder::new(&bytes)).expect("certified");
+    assert_eq!(decoded, certified);
+    assert_eq!(decoded.block_number(), 7);
+    assert_eq!(decoded.inclusion_proof(), Some(&proof));
+    assert_eq!(decoded.unicity_certificate(), &proof.unicity_certificate);
+
+    let not_certified = InclusionProofResponse::NotCertified {
+        block_number: 9,
+        unicity_certificate: proof.unicity_certificate.clone(),
+    };
+    let bytes = not_certified.to_cbor();
+    let decoded = InclusionProofResponse::from_cbor(Decoder::new(&bytes)).expect("not certified");
+    assert_eq!(decoded, not_certified);
+    assert_eq!(decoded.block_number(), 9);
+    assert_eq!(decoded.inclusion_proof(), None);
+    assert_eq!(decoded.unicity_certificate(), &proof.unicity_certificate);
+
+    // The uncertified body is not an InclusionProof, and says so rather than
+    // decoding into one with empty fields.
+    let items = Decoder::new(&bytes).array(Some(2)).unwrap();
+    assert!(unicity_token::api::InclusionProof::from_cbor(items[1]).is_err());
 }

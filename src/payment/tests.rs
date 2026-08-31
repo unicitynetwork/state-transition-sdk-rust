@@ -142,9 +142,9 @@ fn valid_proof(
         Some(transaction.expires_at().expect("explicit timeout fixture")),
     );
     InclusionProof {
-        certification_data: Some(certification_data),
-        reference_time: Some(REFERENCE_TIME),
-        inclusion_certificate: Some(InclusionCertificate::decode(&[0u8; 32]).unwrap()),
+        certification_data,
+        reference_time: REFERENCE_TIME,
+        inclusion_certificate: InclusionCertificate::decode(&[0u8; 32]).unwrap(),
         unicity_certificate: signed_uc(node, root),
     }
 }

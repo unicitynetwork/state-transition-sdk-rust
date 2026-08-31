@@ -13,10 +13,12 @@ use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use unicity_token::api::inclusion_proof::INCLUSION_PROOF_TAG;
 use unicity_token::api::{
-    CertificationData, InclusionProof, NonInclusionCertificate, NonInclusionProof, StateId,
+    CertificationData, InclusionProof, InclusionProofResponse, NonInclusionCertificate,
+    NonInclusionProof, StateId,
 };
-use unicity_token::cbor::{encode_array, encode_uint};
+use unicity_token::cbor::{encode_array, encode_null, encode_tag, encode_uint};
 use unicity_token::client::{
     AggregatorClient, HttpAggregatorClient, HttpError, MembershipStatus,
     NonInclusionAggregatorClient,
@@ -42,33 +44,54 @@ fn fixture_proof_and_data() -> (InclusionProof, CertificationData) {
     let carol = hex::decode(field(FIXTURE, "carolToken")).unwrap();
     let token = Token::from_cbor(&carol).unwrap();
     let proof = token.transactions()[0].inclusion_proof().clone();
-    let data = proof
-        .certification_data
-        .clone()
-        .expect("fixture has cert data");
+    let data = proof.certification_data.clone();
     (proof, data)
 }
 
 /// Wrap an inclusion proof as the `[blockNumber, InclusionProof]` response body
 /// the aggregator returns, hex-encoded.
 fn proof_response_hex(proof: &InclusionProof) -> String {
-    let block = encode_uint(7);
-    let body = encode_array(&[block.as_slice(), proof.to_cbor().as_slice()]);
-    hex::encode(body)
+    hex::encode(
+        InclusionProofResponse::Certified {
+            block_number: 7,
+            proof: proof.clone(),
+        }
+        .to_cbor(),
+    )
 }
 
 /// The same wrapper for a leaf that is not certified yet: the three leaf fields
 /// are absent together, which is what aggregator-go returns while pending.
 fn empty_proof_response_hex(proof: &InclusionProof) -> String {
-    let pending = InclusionProof {
-        certification_data: None,
-        reference_time: None,
-        inclusion_certificate: None,
-        unicity_certificate: proof.unicity_certificate.clone(),
+    hex::encode(
+        InclusionProofResponse::NotCertified {
+            block_number: 7,
+            unicity_certificate: proof.unicity_certificate.clone(),
+        }
+        .to_cbor(),
+    )
+}
+
+/// A response whose leaf fields are only partly present, which no aggregator
+/// may send. Assembled by hand: neither `InclusionProof` nor
+/// `InclusionProofResponse` can represent it, which is what this asserts.
+fn partial_proof_response_hex(proof: &InclusionProof, keep_reference_time: bool) -> String {
+    let reference_time = if keep_reference_time {
+        encode_uint(proof.reference_time)
+    } else {
+        encode_null()
     };
-    let block = encode_uint(7);
-    let body = encode_array(&[block.as_slice(), pending.to_cbor().as_slice()]);
-    hex::encode(body)
+    let inner = encode_tag(
+        INCLUSION_PROOF_TAG,
+        &encode_array(&[
+            &encode_uint(1),
+            &encode_null(),
+            &reference_time,
+            &encode_null(),
+            &proof.unicity_certificate.to_cbor(),
+        ]),
+    );
+    hex::encode(encode_array(&[encode_uint(7).as_slice(), inner.as_slice()]))
 }
 
 fn fixture_non_inclusion_proof() -> NonInclusionProof {
@@ -329,8 +352,8 @@ fn get_inclusion_proof_returns_complete_proof() {
     let got = client(&server.url)
         .get_inclusion_proof(&state_id)
         .expect("should return a complete proof");
-    assert!(got.certification_data.is_some());
-    assert!(got.inclusion_certificate.is_some());
+    assert_eq!(got.certification_data, data);
+    assert_eq!(got.reference_time, proof.reference_time);
     assert_eq!(server.request_count(), 1, "should not poll once complete");
 
     // The state-id header is not sent for proof lookups.
@@ -343,13 +366,7 @@ fn get_inclusion_proof_returns_complete_proof() {
 #[test]
 fn get_inclusion_proof_rejects_incomplete_response_without_polling() {
     let (proof, data) = fixture_proof_and_data();
-    let incomplete = InclusionProof {
-        reference_time: proof.reference_time,
-        certification_data: None,
-        inclusion_certificate: None,
-        unicity_certificate: proof.unicity_certificate.clone(),
-    };
-    let response = ok_json(&format!("\"{}\"", proof_response_hex(&incomplete)));
+    let response = ok_json(&format!("\"{}\"", partial_proof_response_hex(&proof, true)));
     let server = MockServer::start(vec![response]);
 
     let state_id = StateId::derive(data.lock_script(), data.source_state_hash());

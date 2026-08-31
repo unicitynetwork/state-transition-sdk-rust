@@ -23,6 +23,10 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Test (default features)
         run: cargo test
+      - name: Test (all features)
+        # The `http` transport tests and the live-e2e target are gated behind a
+        # non-default feature, so `cargo test` alone never compiles or runs them.
+        run: cargo test --all-features
       - name: Test (no default features, verification core)
         run: cargo test --no-default-features --features alloc
 

@@ -14,7 +14,7 @@ use crate::verify::VerificationError;
 
 /// CBOR tag for [`Token`].
 pub const TOKEN_TAG: u64 = 39040;
-const VERSION: u64 = 1;
+const VERSION: u64 = 2;
 
 /// A token: its genesis mint and the chain of certified transfers.
 #[derive(Debug, Clone, PartialEq, Eq)]
