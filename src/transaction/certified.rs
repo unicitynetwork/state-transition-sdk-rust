@@ -1,8 +1,7 @@
 //! Certified transactions: a transaction bundled with its inclusion proof.
 //!
 //! These wrap [`MintTransaction`] / [`TransferTransaction`] and are *not* tagged.
-//! On the wire each value is a 3-element array
-//! `[transaction, referenceTime, inclusionProof]`.
+//! On the wire each value is a 2-element array `[transaction, inclusionProof]`.
 //!
 //! The reference time is fixed when the transaction is first bound to a proof
 //! and carried from then on: the tree is append-only, so a proof fetched later

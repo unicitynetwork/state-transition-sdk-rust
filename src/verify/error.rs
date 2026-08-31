@@ -64,6 +64,8 @@ pub enum VerificationError {
     TransactionHashMismatch,
     /// The inclusion proof's reference time differs from the one the transition carries.
     ReferenceTimeMismatch,
+    /// The leaf claims a reference time later than the round that certified it.
+    ReferenceTimeAfterRound,
     /// The round's reference time had already reached the request's timeout.
     RequestExpired,
     /// The sparse-Merkle-tree path did not reproduce the expected root.
@@ -174,6 +176,12 @@ impl fmt::Display for VerificationError {
             VerificationError::TransactionHashMismatch => write!(f, "transaction hash mismatch"),
             VerificationError::ReferenceTimeMismatch => {
                 write!(f, "inclusion proof reference time mismatch")
+            }
+            VerificationError::ReferenceTimeAfterRound => {
+                write!(
+                    f,
+                    "inclusion proof reference time is after its certified round"
+                )
             }
             VerificationError::RequestExpired => write!(f, "certification request expired"),
             VerificationError::PathInvalid => write!(f, "inclusion path invalid"),

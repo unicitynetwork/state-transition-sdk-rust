@@ -224,6 +224,9 @@ pub fn verify_inclusion_proof_for(
     if proof.reference_time != reference_time {
         return Err(VerificationError::ReferenceTimeMismatch);
     }
+    if reference_time > proof.unicity_certificate.input_record.timestamp {
+        return Err(VerificationError::ReferenceTimeAfterRound);
+    }
     let leaf_value = calculate_leaf_value(certification_data.transaction_hash(), reference_time);
     if !inclusion_certificate.verify(state_id, &leaf_value, &expected_root) {
         return Err(VerificationError::PathInvalid);
@@ -434,7 +437,7 @@ mod tests {
             network_id: NetworkId::LOCAL,
             root_chain_round_number: 0,
             epoch: 0,
-            timestamp: 0,
+            timestamp: REFERENCE_TIME,
             previous_hash: None,
             hash,
             signatures,
@@ -482,7 +485,7 @@ mod tests {
             previous_hash: None,
             hash: root.to_vec(),
             summary_value: Vec::new(),
-            timestamp: 0,
+            timestamp: REFERENCE_TIME,
             block_hash: None,
             sum_of_earned_fees: 0,
             executed_transactions_hash: None,
@@ -808,6 +811,18 @@ mod tests {
         assert_eq!(
             verify_inclusion_proof(&tb, &proof, &transfer, TIMEOUT),
             Err(VerificationError::RequestExpired)
+        );
+    }
+
+    #[test]
+    fn rule_reference_time_cannot_postdate_certified_round() {
+        let (tb, node, _owner, transfer, mut proof) = transfer_case();
+        proof.unicity_certificate.input_record.timestamp = REFERENCE_TIME - 1;
+        reseal(&mut proof, &node);
+
+        assert_eq!(
+            verify_inclusion_proof(&tb, &proof, &transfer, REFERENCE_TIME),
+            Err(VerificationError::ReferenceTimeAfterRound)
         );
     }
 
