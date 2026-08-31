@@ -1,13 +1,14 @@
 //! Live end-to-end test against the testnet2 gateway.
 //!
-//! Reads connection parameters from `e2e/unicity-service` and the trust base
-//! from `e2e/bft-trustbase.testnet2.json`, then mints and transfers a token
-//! through the real aggregator and verifies the result.
+//! Reads connection parameters from `e2e/.env` (see `e2e/.env.example`), the
+//! same source the examples and the `e2e/` demo crate use, then mints and
+//! transfers a token through the real aggregator and verifies the result.
 //!
 //! Ignored by default (it requires network access and live infra). Run with:
 //!   cargo test --features http --test e2e -- --ignored --nocapture
 #![cfg(feature = "http")]
 
+use std::path::Path;
 use std::time::Duration;
 
 use unicity_token::api::bft::RootTrustBase;
@@ -16,22 +17,27 @@ use unicity_token::crypto::signer::{Secp256k1Signer, Signer};
 use unicity_token::predicate::builtin::SignaturePredicate;
 use unicity_token::transaction::ids::{StateMask, TokenSalt, TokenType};
 
-/// Parse the `key: value` lines of `e2e/unicity-service`.
-fn read_service() -> (String, Option<String>) {
-    let text = std::fs::read_to_string("e2e/unicity-service").expect("e2e/unicity-service");
-    let mut gateway = None;
-    let mut api_key = None;
-    for line in text.lines() {
-        if let Some((k, v)) = line.split_once(':') {
-            let value = v.trim().to_string();
-            match k.trim() {
-                "gateway" => gateway = Some(value),
-                "api_key" => api_key = Some(value),
-                _ => {}
-            }
-        }
-    }
-    (gateway.expect("gateway in e2e/unicity-service"), api_key)
+const DEFAULT_GATEWAY: &str = "https://gateway.testnet2.unicity.network/";
+const DEFAULT_TRUSTBASE: &str = "bft-trustbase.testnet2.json";
+
+/// Read connection parameters from `e2e/.env`, matching the examples and the
+/// `e2e/` demo crate. Values already in the process environment take
+/// precedence, so CI can supply the key without writing a file.
+fn read_service() -> (String, Option<String>, String) {
+    dotenvy::from_path("e2e/.env").ok();
+
+    let gateway = std::env::var("UNICITY_GATEWAY").unwrap_or_else(|_| DEFAULT_GATEWAY.to_string());
+    let api_key = std::env::var("UNICITY_API_KEY")
+        .ok()
+        .filter(|k| !k.is_empty());
+    let trustbase =
+        std::env::var("UNICITY_TRUSTBASE").unwrap_or_else(|_| DEFAULT_TRUSTBASE.to_string());
+    let trustbase_path = if Path::new(&trustbase).is_absolute() {
+        trustbase
+    } else {
+        format!("e2e/{trustbase}")
+    };
+    (gateway, api_key, trustbase_path)
 }
 
 #[test]
@@ -42,9 +48,9 @@ fn e2e_mint_transfer_verify() {
         .expect("system clock before Unix epoch")
         .as_secs()
         + 3600;
-    let (gateway, api_key) = read_service();
-    let trust_json =
-        std::fs::read_to_string("e2e/bft-trustbase.testnet2.json").expect("trust base file");
+    let (gateway, api_key, trustbase_path) = read_service();
+    let trust_json = std::fs::read_to_string(&trustbase_path)
+        .unwrap_or_else(|e| panic!("read trust base {trustbase_path}: {e}"));
     let trust_base = RootTrustBase::from_json(&trust_json).expect("parse trust base");
 
     let mut aggregator =
