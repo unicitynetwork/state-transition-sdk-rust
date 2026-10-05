@@ -1,189 +1,148 @@
-# Unicity State Transition SDK -- Rust
+# Unicity State Transition SDK — Rust
 
-A Rust SDK for the Unicity token state-transition protocol.
+Build applications that mint, transfer, and verify digital assets on the Unicity Network. This Rust SDK gives you control over tokens, ownership rules, and payments, with cryptographic verification built in.
 
-The crate is `no_std`-first: the verification core has no C dependencies
-(RustCrypto `sha2` + `k256`), is allocation-light, and runs inside a **zkVM
-guest** (SP1 / RISC0) or on `wasm32`. The default build adds the necessary
-client for minting and transferring tokens.
+Unicity combines private, off-chain token transactions with network-backed protection against double-spending. Token data stays with the parties you share it with, while unicity proofs let recipients verify that assets are spent only once. The network is designed to scale horizontally as demand grows.
+
+- **Create digital assets:** mint tokens with your own types and application data payload.
+- **Move value:** transfer tokens and split fungible tokens for payments.
+- **Verify locally:** validate token history and unicity proofs against the compact trust base.
+- **Integrate with your application:** choose ownership predicates, issuance policies, storage, and delivery channels.
+- **Use Rust across environments:** use the HTTP client in host applications or the `no_std` verification core in WASM and zkVM guests.
+
+## Installation
+
+Requires Rust 1.81 or later. Add the SDK with its HTTP client to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-unicity-token = "3.0"
+unicity-token = { version = "0.1", features = ["http"] }
 ```
 
-The version line is shared with the TypeScript and Java SDKs: a 3.0.1 client
-interoperates with `state-transition-sdk-js` 3.0.1 and
-`state-transition-sdk-java` 3.0.1, and with an aggregator at
-`ghcr.io/unicitynetwork/aggregator-go:sha-ae08165` or later.
+## Unicity Network
 
-## Security model
+Mainnet is live. Start with testnet2; for production, use the mainnet gateway and matching trust base.
 
-Decoding a token proves its structural integrity only. Trust is established only by
-`Token::verify`, which walks an unbroken chain of cryptographic checks from a
-caller-supplied root of trust down to every state in the token's history.
+| Network | Gateway | Network ID | Trust base |
+| --- | --- | --- | --- |
+| Mainnet | `https://gateway.mainnet.unicity.network` | `1` | [JSON](https://raw.githubusercontent.com/unicitynetwork/unicity-ids/main/bft-trustbase.mainnet.json) |
+| Testnet2 | `https://gateway.testnet2.unicity.network` | `4` | [JSON](https://raw.githubusercontent.com/unicitynetwork/unicity-ids/main/bft-trustbase.testnet2.json) |
 
-`Token::verify` treats application `data` and any mint *justification* as
-**opaque** and rejects a token that carries either — unless you explicitly
-register a verifier for it. There is no implicit trust in the API.
+Pass your gateway API key through `HttpAggregatorClient::with_api_key`. The public testnet2 key is `sk_ddc3cfcc001e4a28ac3fad7407f99590`. Use your own mainnet key obtained from [Sphere](https://sphere.unicity.network/) and keep it secure.
 
-The root of trust is the Unicity Trust Base json. An authentic trust base must
-be bundled with the application or left user-configurable.
+### Client setup
 
-## Verify a token (`no_std` core, no features needed)
-
-```rust
-use unicity_token::Token;
-use unicity_token::api::bft::RootTrustBase;
-
-// Root of trust (validator set + quorum), supplied out-of-band.
-let trust_base = RootTrustBase::from_json(trust_base_json)?; // ::new(..) in no_std
-
-let token = Token::from_cbor(&token_bytes)?; // decoding confers NO trust
-token.verify(&trust_base)?;                  // verifies the cryptographic history
-```
-
-## Mint & transfer against a live aggregator (`http` feature)
+Download the testnet2 trust base above as `bft-trustbase.testnet2.json` in your working directory. Configure the client and load the trust base:
 
 ```rust
 use std::time::Duration;
 use unicity_token::api::bft::RootTrustBase;
-use unicity_token::client::{self, HttpAggregatorClient};
+use unicity_token::client::HttpAggregatorClient;
 
-let trust_base = RootTrustBase::from_json(&std::fs::read_to_string("trust-base.json")?)?;
-let aggregator = HttpAggregatorClient::new("https://gateway.testnet2.unicity.network/")
-    .with_api_key("sk_…")
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let trust_base = RootTrustBase::from_json(
+        &std::fs::read_to_string("bft-trustbase.testnet2.json")?,
+    )?;
+    let _aggregator = HttpAggregatorClient::new(
+        "https://gateway.testnet2.unicity.network",
+    )
+    .with_api_key("sk_ddc3cfcc001e4a28ac3fad7407f99590") // Public testnet2 key
     .with_polling(Duration::from_secs(2), 90);
-let token = client::mint(&aggregator, &trust_base, trust_base.network_id,
-    &recipient, token_type, salt, /* data */ None, /* justification */ None,
-    /* expires_at */ None)?;
-```
 
-`expires_at` is the exclusive request deadline in Unix seconds. Use `None` to let the Unicity
-Service assign a default one from consensus time, or explicitly `Some(deadline)`.
-
-The SDK is generic over the `AggregatorClient` trait, so you can plug in any
-transport (or an in-memory one for tests); `HttpAggregatorClient` is the
-batteries-included blocking JSON-RPC implementation.
-Inclusion polling accepts either way a server reports a leaf that is not
-certified yet: an explicit `-32021` pending status, or a successful response
-whose leaf fields are absent. `get_inclusion_proof.v2` never answers with a
-non-inclusion proof, so the empty response is unambiguous. Only the explicit
-status lets the client tell "not yet" apart from "no such state": against a
-server that reports it, an unknown StateID fails immediately as
-`HttpError::StateNotFound` rather than consuming the polling budget; against one
-that does not, it polls to the attempt limit.
-
-## Prove that a state is absent
-
-```rust
-use unicity_token::client::NonInclusionAggregatorClient;
-
-let proof = aggregator.get_non_inclusion_proof(&state_id)?;
-proof.verify(&trust_base)?; // verifies the StateId bound by the client
-```
-
-Verification authenticates the terminal leaf and every branch choice against
-the quorum-signed SMT root, then checks that the terminal key differs from the
-requested state id. A proof is a snapshot statement at its embedded certified
-root; a caller that needs “still absent now” must separately enforce an
-acceptable certified round or timestamp. The HTTP client distinguishes an
-already-included state (`HttpError::StateIncluded`) from the absence of any
-certified root (`HttpError::CertifiedStateUnavailable`).
-
-If the caller does not know which relation holds, the HTTP client hides the
-endpoint selection:
-
-```rust
-use unicity_token::client::MembershipStatus;
-
-match aggregator.membership_status(&state_id)? {
-    MembershipStatus::Included(proof) => proof.verify_for(&state_id, &trust_base)?,
-    MembershipStatus::Absent(proof) => proof.verify(&trust_base)?,
+    println!("Network ID: {}", trust_base.network_id.id());
+    Ok(())
 }
 ```
 
-## Payment tokens & splits
+The trust base identifies the Consensus Layer (BFT Core) instance. Pin a trusted copy in your application for production. Use `trust_base.network_id` when creating tokens so they match your gateway; testnet2 is network ID `4` (`NetworkId::TESTNET` is `2`).
 
-A token can carry a fungible **payment payload** (a canonical set of asset id →
-amount entries) in its mint `data`, and can be **split** into new tokens whose
-per-asset allocations sum to the original. Splitting burns the source and proves
-each output's share with a radix sparse Merkle sum tree (RSMST) inclusion proof.
+`HttpAggregatorClient` provides a blocking HTTP transport. Applications can implement the `AggregatorClient` trait to supply their own transport.
 
-Payment verification is **fail-closed and policy-gated** — cryptographic
-validity never authorizes an asset issuer on its own. You register the verifiers
-and issuance policy you trust, then call `payment::verify_payment_token` instead
-of bare `Token::verify`:
+## Working with tokens
+
+The SDK handles cryptography and token encoding. Your application manages keys, stores tokens, and delivers them to recipients over your chosen transport.
+
+| Task | SDK entry points | Example |
+| --- | --- | --- |
+| Mint a token | `client::mint` | [Mint](./examples/mint.rs) |
+| Transfer ownership | `client::transfer` | [Transfer](./examples/transfer.rs) |
+| Split a fungible token | `payment::TokenSplit::split` | [Split](./examples/split.rs) |
+| Verify a payment token | `payment::verify_payment_token` | [Payment verification](./examples/split.rs) |
+
+`client::mint` and `client::transfer` submit the transaction, wait for its unicity proof (`InclusionProof` in the API), and return the verified token. The [split example](./examples/split.rs) includes payment verifier setup.
+
+### Store, send, and receive
+
+Serialize with `token.to_cbor()` to save or send a token, and deserialize with `Token::from_cbor(bytes)` to load it. Verify received tokens before accepting them:
 
 ```rust
-use unicity_token::payment::{
-    verify_payment_token, PaymentAssetCollection, PaymentDataVerifier,
-    SplitMintJustificationVerifier,
-};
-use unicity_token::verify::MintJustificationRegistry;
+use unicity_token::Token;
 
-// `authorize` is your closure: given the genesis + decoded assets, decide
-// whether this issuance is allowed (issuer key, supply caps, …).
-let mut registry = MintJustificationRegistry::new();
-registry
-    .register(Box::new(SplitMintJustificationVerifier::new()))?         // accept split outputs
-    .register_token_data(Box::new(PaymentDataVerifier::new(            // validate the payload…
-        my_token_type, authorize)))?;                                  // …then run *your* policy
-
-let assets = verify_payment_token(
-    &token, &trust_base, &registry, PaymentAssetCollection::from_cbor_bytes,
-)?; // returns the validated assets; fails closed if anything is off
+// `token_bytes` comes from your storage or transport.
+let token = Token::from_cbor(&token_bytes)?;
+token.verify(&trust_base)?;
 ```
 
-Constructing a split is a `client`-feature operation
-(`payment::TokenSplit::split`) that verifies the source token fully before
-building the irreversible burn. See `src/payment/tests.rs` for the end-to-end
-split → verify flow.
+`Token::verify` checks cryptographic history; application data remains opaque. Use `Token::verify_with` for registered mint justifications and `payment::verify_payment_token` for payments.
+
+### Run the examples
+
+From a repository checkout, set the public testnet2 key and run a flow:
+
+```bash
+export UNICITY_API_KEY=sk_ddc3cfcc001e4a28ac3fad7407f99590
+cargo run --example mint --features http
+cargo run --example transfer --features http
+cargo run --example split --features http
+```
+
+The examples default to testnet2 with its bundled trust base. Configure `UNICITY_GATEWAY`, `UNICITY_API_KEY`, and `UNICITY_TRUSTBASE` through your environment or `e2e/.env`; relative trust-base paths resolve under `e2e/`. Example keys are discarded on exit. See [example configuration](./examples/README.md).
+
+## Security
+
+Unicity proofs provide independently verifiable evidence of certified state transitions being unique, backed by the network's Byzantine fault tolerant consensus. Together with ownership verification, they protect against double-spending without publishing token contents to a public ledger.
+
+Verify tokens against the correct trust base and configure accepted issuers through `PaymentDataVerifier` and `MintJustificationRegistry`. Cryptographic validity does not authorize an issuer. Keep private keys and token backups secure, and check that received tokens belong to the intended recipient.
 
 ## Feature flags
 
-| Flag | Default | Purpose |
-|------|:-------:|---------|
-| `alloc` | (transitive) | Required by the core (`Vec`/`BTreeMap` for CBOR + structures). |
-| `std` | y | std error integration, host RNG, JSON trust-base parsing. |
-| `client` | y | Transaction construction, signing, mint/transfer flow, split construction. |
-| `http` | | Blocking JSON-RPC `HttpAggregatorClient` (host only; pulls in a TLS stack). |
+| Feature | Default | Purpose |
+| --- | --- | --- |
+| `alloc` | Via `std` and `client` | Allocated structures used by the verification core. |
+| `std` | Yes | Standard library integration, key generation, and JSON trust-base parsing. |
+| `client` | Yes | Transaction construction, signing, minting, transfers, and split construction. |
+| `http` | No | Blocking HTTP client for host applications. Enables `std` and `client`. |
 
-Payment/asset **verification** is provided by `no_std` core and needs no feature.
-The zkVM/WASM guest build is `--no-default-features --features alloc`.
+For verification in a `no_std` environment, including WASM and zkVM guests:
 
-## Building & testing
-
-```sh
-cargo test                                         # default features
-cargo test --all-features                          # adds the http transport tests
-cargo test --no-default-features --features alloc  # verification core only
-cargo build --no-default-features --features alloc --target wasm32-unknown-unknown
+```toml
+[dependencies]
+unicity-token = { version = "0.1", default-features = false, features = ["alloc"] }
 ```
 
-The cross-SDK fixture under [`tests/vectors/`](./tests/vectors) is generated by
-the TypeScript SDK; see the README there before changing anything on the wire.
+Token and payment verification remain available in this configuration. Construct the trust base with `RootTrustBase::try_new`; JSON parsing requires `std`.
 
-Live end-to-end test against an aggregator. It reads `e2e/.env` (copy
-`e2e/.env.example` and set `UNICITY_API_KEY`), the same configuration the
-examples and the `e2e/` demo crate use:
+## Development
 
-```sh
+```bash
+cargo test
+cargo test --all-features
+cargo test --no-default-features --features alloc
+cargo fmt --all --check
+cargo clippy --all-targets --all-features -- -D warnings
+```
+
+The [live end-to-end test](./tests/e2e.rs) is ignored by default. It reads gateway credentials from `e2e/unicity-service` and uses `e2e/bft-trustbase.testnet2.json`:
+
+```bash
 cargo test --features http --test e2e -- --ignored --nocapture
 ```
 
-## Examples
+## Resources
 
-Runnable flows in [`examples/`](./examples), talking to a live aggregator via
-`HttpAggregatorClient` (config from `e2e/.env`):
-
-```sh
-cargo run --example mint     --features http   # mint a token, print its CBOR
-cargo run --example transfer --features http   # mint then transfer
-cargo run --example split    --features http   # mint a coin, split it, verify outputs
-```
-
-A self-contained demo application is provided under [`e2e/`](./e2e).
+- [Unicity Network](https://github.com/unicitynetwork/)
+- [Examples](./examples) and [standalone demo](./e2e/README.md)
+- [Report an issue](https://github.com/unicitynetwork/state-transition-sdk-rust/issues)
 
 ## License
 
