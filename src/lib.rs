@@ -38,8 +38,10 @@ pub mod api;
 pub mod cbor;
 #[cfg(feature = "client")]
 pub mod client;
+pub mod consolidation;
 pub mod crypto;
 pub mod error;
+mod fifo_index;
 pub mod payment;
 pub mod predicate;
 mod radix;
