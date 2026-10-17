@@ -27,9 +27,15 @@ use crate::cbor::Decoder;
 use super::{
     rpc_code, AggregatorClient, BatchAggregatorClient, BatchFailure, BatchProof, BatchRequest,
     InclusionProofBatch, MembershipStatus, NonInclusionAggregatorClient, RequestOptions, StateRoot,
-    MAX_BATCH_STATE_IDS, UNCLASSIFIED,
+    WaitRequest, WaitedBatch, WaitedFailure, DEFAULT_WAIT_MARGIN_MS, MAX_BATCH_STATE_IDS,
+    MAX_WAIT_MS, UNCLASSIFIED,
 };
 use crate::consolidation::PartitionView;
+
+mod wait;
+pub use wait::{
+    WaitOptions, WaitOutcome, WaitStats, DEFAULT_MAX_REQUEST_TIMEOUT, DEFAULT_PREFERRED_WAIT,
+};
 
 const MAX_RESPONSE_BODY_BYTES: usize = 8 * 1024 * 1024;
 const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
@@ -43,6 +49,20 @@ const RPC_STATE_NOT_FOUND: i64 = -32020;
 const RPC_INCLUSION_PENDING: i64 = -32021;
 const RPC_STATE_INCLUDED: i64 = -32022;
 const RPC_SERVER_BUSY: i64 = -32023;
+
+/// One proof lookup with the long-poll echo (see
+/// [`HttpAggregatorClient::lookup_inclusion_proof_with_wait`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaitedLookup {
+    /// The decoded, **unverified** response.
+    pub response: InclusionProofResponse,
+    /// The unauthenticated status hint.
+    pub status: Option<ProofStatus>,
+    /// `waitedMs`, the server's claim of how long it held the request. `None`
+    /// when the response had no echo. Timing metadata only: never evidence about
+    /// the state, never a reason to extend a deadline.
+    pub waited_ms: Option<u64>,
+}
 
 /// Default number of `unknown` status answers tolerated while waiting for a proof
 /// before failing: right after a submission an HA instance that did not admit the
@@ -83,8 +103,10 @@ pub enum HttpError {
     },
     /// The aggregator rejected the certification request (status != SUCCESS).
     Rejected(String),
-    /// Polling for the inclusion proof exceeded the configured attempts.
+    /// Polling for the inclusion proof exceeded the configured attempts or deadline.
     Timeout,
+    /// The caller cancelled the wait.
+    Cancelled,
     /// The aggregator has no certified or pending record for this state id.
     StateNotFound,
     /// The aggregator reports (an unauthenticated hint, see [`ProofStatus`]) that
@@ -126,6 +148,7 @@ impl fmt::Display for HttpError {
             }
             HttpError::Rejected(s) => write!(f, "certification rejected: {s:?}"),
             HttpError::Timeout => write!(f, "timed out waiting for inclusion proof"),
+            HttpError::Cancelled => write!(f, "wait cancelled"),
             HttpError::StateNotFound => write!(f, "state is not known to the aggregator"),
             HttpError::StateCertifiedWithOtherData => write!(
                 f,
@@ -376,14 +399,53 @@ impl HttpAggregatorClient {
             "includeStatus": true,
         });
         let result = self.rpc("get_inclusion_proof.v2", params, &[])?;
-        let (encoded, status) = split_status_result(&result)?;
-        if encoded.len() > MAX_PROOF_HEX_CHARS {
-            return Err(HttpError::ResponseTooLarge {
-                limit: MAX_PROOF_HEX_CHARS,
-            });
+        let parsed = decode_v2_result(&result)?;
+        Ok((parsed.response, parsed.status))
+    }
+
+    /// One proof lookup that asks the aggregator to hold the request for up to
+    /// `wait_ms` milliseconds while the state is pending (`waitMs`), returning the
+    /// echo (`waitedMs`) next to the response and status hint.
+    ///
+    /// A one-shot building block: it never polls or retries. `timeout` is the
+    /// whole call's limit (connection, the server-side wait and the response);
+    /// the wait sent is limited to `timeout - wait.margin_ms` (the request's
+    /// response margin, default [`DEFAULT_WAIT_MARGIN_MS`]).
+    /// A positive `wait_ms` for which no positive wait fits sends no `waitMs` at
+    /// all (an ordinary immediate lookup); a `wait_ms` of zero is sent and asks
+    /// for the echo only. Servers that do not know `waitMs` ignore it and answer
+    /// a plain result: the lookup then succeeds with `waited_ms == None`.
+    ///
+    /// The unauthenticated hint and echo never replace verification of the
+    /// proof.
+    pub fn lookup_inclusion_proof_with_wait(
+        &self,
+        state_id: &StateId,
+        wait: &WaitRequest,
+        timeout: Duration,
+    ) -> Result<WaitedLookup, HttpError> {
+        let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
+        let mut params = serde_json::json!({
+            "stateId": hex::encode(state_id.bytes()),
+            "includeStatus": true,
+        });
+        if let Some(sent) = super::batch::wait_on_wire(wait.wait_ms, timeout_ms, wait.margin_ms) {
+            params["waitMs"] = serde_json::json!(sent);
         }
-        let bytes = hex::decode(encoded).map_err(|e| HttpError::Decode(e.to_string()))?;
-        Ok((decode_inclusion_proof_response(&bytes)?, status))
+        let result = self
+            .rpc_raw(
+                "get_inclusion_proof.v2",
+                params,
+                &[],
+                Some(timeout.max(Duration::from_millis(1))),
+            )
+            .map_err(raw_to_http)?;
+        let parsed = decode_v2_result(&result)?;
+        Ok(WaitedLookup {
+            response: parsed.response,
+            status: parsed.status,
+            waited_ms: parsed.waited_ms,
+        })
     }
 
     /// Determine whether `state_id` is included or absent at a certified root.
@@ -509,7 +571,7 @@ impl HttpAggregatorClient {
                 };
                 return Err(RawFailure::Http { status, body, rpc });
             }
-            Err(e) => return Err(RawFailure::Transport(e.to_string())),
+            Err(e) => return Err(transport_failure(&e)),
         };
         if !(200..300).contains(&response.status()) {
             return Err(RawFailure::Http {
@@ -527,7 +589,7 @@ impl HttpAggregatorClient {
 fn raw_to_http(e: RawFailure) -> HttpError {
     match e {
         RawFailure::Http { status, body, .. } => HttpError::Http { status, body },
-        RawFailure::Transport(m) => HttpError::Transport(m),
+        RawFailure::Transport(m) | RawFailure::TimedOut(m) => HttpError::Transport(m),
         RawFailure::Envelope(EnvelopeError::Decode(m)) => HttpError::Decode(m),
         RawFailure::Envelope(EnvelopeError::Rpc { code, message, .. }) => {
             HttpError::Rpc { code, message }
@@ -583,9 +645,42 @@ enum RawFailure {
         rpc: Option<EnvelopeError>,
     },
     Transport(String),
+    /// A transport failure caused by a timeout (an `io::ErrorKind::TimedOut` at the
+    /// root of the error chain).
+    TimedOut(String),
     Envelope(EnvelopeError),
     TooLarge(usize),
     Config(HttpError),
+}
+
+fn is_timeout_kind(kind: std::io::ErrorKind) -> bool {
+    matches!(
+        kind,
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+    )
+}
+
+/// Classify a ureq transport error by walking its source chain to an
+/// `io::Error`, not by its text.
+fn transport_failure(error: &ureq::Error) -> RawFailure {
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(e) = source {
+        if let Some(io) = e.downcast_ref::<std::io::Error>() {
+            if is_timeout_kind(io.kind()) {
+                return RawFailure::TimedOut(error.to_string());
+            }
+        }
+        source = e.source();
+    }
+    RawFailure::Transport(error.to_string())
+}
+
+fn io_failure(error: &std::io::Error) -> RawFailure {
+    if is_timeout_kind(error.kind()) {
+        RawFailure::TimedOut(error.to_string())
+    } else {
+        RawFailure::Transport(error.to_string())
+    }
 }
 
 fn read_response_raw(response: ureq::Response, limit: usize) -> Result<String, RawFailure> {
@@ -594,7 +689,7 @@ fn read_response_raw(response: ureq::Response, limit: usize) -> Result<String, R
         .into_reader()
         .take(limit as u64 + 1)
         .read_to_end(&mut bytes)
-        .map_err(|e| RawFailure::Transport(e.to_string()))?;
+        .map_err(|e| io_failure(&e))?;
     if bytes.len() > limit {
         return Err(RawFailure::TooLarge(limit));
     }
@@ -728,13 +823,9 @@ impl AggregatorClient for HttpAggregatorClient {
                 }
                 Err(error) => return Err(error),
             };
-            let (encoded, status) = split_status_result(&result)?;
-            if encoded.len() > MAX_PROOF_HEX_CHARS {
-                return Err(HttpError::ResponseTooLarge {
-                    limit: MAX_PROOF_HEX_CHARS,
-                });
-            }
-            let bytes = hex::decode(encoded).map_err(|e| HttpError::Decode(e.to_string()))?;
+            let V2Result {
+                response, status, ..
+            } = decode_v2_result(&result)?;
 
             // A response carrying no proof on this method means the leaf is not
             // certified yet. `get_inclusion_proof.v2` never answers with a
@@ -742,7 +833,7 @@ impl AggregatorClient for HttpAggregatorClient {
             // uncertified response is unambiguous and is aggregator-go's way of
             // reporting pending. The status hint, when present, refines that into
             // "keep waiting" / "will never be certified here".
-            match decode_inclusion_proof_response(&bytes)? {
+            match response {
                 InclusionProofResponse::Certified { proof, .. } => return Ok(proof),
                 InclusionProofResponse::NotCertified { .. } => match status {
                     Some(ProofStatus::Expired) => return Err(HttpError::StateExpired),
@@ -765,26 +856,58 @@ impl AggregatorClient for HttpAggregatorClient {
     }
 }
 
-/// Split a `get_inclusion_proof.v2` result into the proof hex and the optional
-/// status hint: a string is the legacy result, an object is `{proof, status}`.
-fn split_status_result(
-    result: &serde_json::Value,
-) -> Result<(&str, Option<ProofStatus>), HttpError> {
-    if let Some(s) = result.as_str() {
-        return Ok((s, None));
+/// A decoded `get_inclusion_proof.v2` result.
+struct V2Result {
+    response: InclusionProofResponse,
+    status: Option<ProofStatus>,
+    waited_ms: Option<u64>,
+}
+
+/// Decode a `get_inclusion_proof.v2` result: a string is the legacy result, an
+/// object is `{proof, status?, waitedMs?}`. A present `waitedMs` must be a plain
+/// non-negative safe integer; anything else is a protocol error. Unknown object
+/// fields stay ignored, as before.
+fn decode_v2_result(result: &serde_json::Value) -> Result<V2Result, HttpError> {
+    let (encoded, status, waited_ms) = if let Some(s) = result.as_str() {
+        (s, None, None)
+    } else {
+        let object = result
+            .as_object()
+            .ok_or_else(|| HttpError::Decode("expected hex string".to_string()))?;
+        let proof = object
+            .get("proof")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| HttpError::Decode("status result lacks a proof string".to_string()))?;
+        let status = object
+            .get("status")
+            .and_then(|v| v.as_str())
+            .and_then(ProofStatus::from_wire);
+        let waited_ms = match object.get("waitedMs") {
+            None => None,
+            Some(v) => Some(parse_waited_ms(v).map_err(HttpError::Decode)?),
+        };
+        (proof, status, waited_ms)
+    };
+    if encoded.len() > MAX_PROOF_HEX_CHARS {
+        return Err(HttpError::ResponseTooLarge {
+            limit: MAX_PROOF_HEX_CHARS,
+        });
     }
-    let object = result
-        .as_object()
-        .ok_or_else(|| HttpError::Decode("expected hex string".to_string()))?;
-    let proof = object
-        .get("proof")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| HttpError::Decode("status result lacks a proof string".to_string()))?;
-    let status = object
-        .get("status")
-        .and_then(|v| v.as_str())
-        .and_then(ProofStatus::from_wire);
-    Ok((proof, status))
+    let bytes = hex::decode(encoded).map_err(|e| HttpError::Decode(e.to_string()))?;
+    Ok(V2Result {
+        response: decode_inclusion_proof_response(&bytes)?,
+        status,
+        waited_ms,
+    })
+}
+
+/// A `waitedMs` echo: a JSON integer in `[0, 2^53 - 1]`. Floats (`1.0`, `1e3`),
+/// negatives, strings, null and overflow are all rejected.
+fn parse_waited_ms(value: &serde_json::Value) -> Result<u64, String> {
+    value
+        .as_u64()
+        .filter(|v| *v <= MAX_WAIT_MS)
+        .ok_or_else(|| "malformed waitedMs".to_string())
 }
 
 impl NonInclusionAggregatorClient for HttpAggregatorClient {
@@ -819,12 +942,15 @@ impl NonInclusionAggregatorClient for HttpAggregatorClient {
     }
 }
 
-impl BatchAggregatorClient for HttpAggregatorClient {
-    fn get_inclusion_proofs(
+impl HttpAggregatorClient {
+    /// One `get_inclusion_proofs.v1` call, optionally with `waitMs`.
+    #[allow(clippy::result_large_err)]
+    fn batch_call(
         &self,
         request: &BatchRequest<'_>,
         options: &RequestOptions,
-    ) -> Result<InclusionProofBatch, BatchFailure> {
+        wait: Option<&WaitRequest>,
+    ) -> Result<WaitedBatch, WaitedFailure> {
         let ids = request.state_ids;
         if ids.is_empty() || ids.len() > MAX_BATCH_STATE_IDS {
             return Err(BatchFailure::Rpc {
@@ -834,16 +960,26 @@ impl BatchAggregatorClient for HttpAggregatorClient {
                 detail: Some("state_count".to_string()),
                 retryable: Some(false),
                 indexes: BTreeMap::new(),
-            });
+            }
+            .into());
         }
         let state_root = match request.state_root {
             StateRoot::Latest => "latest".to_string(),
             StateRoot::Exact(root) => hex::encode(root),
         };
-        let params = serde_json::json!({
+        let mut params = serde_json::json!({
             "stateIds": ids.iter().map(|s| hex::encode(s.bytes())).collect::<Vec<_>>(),
             "stateRoot": state_root,
         });
+        // Never on an exact root: the server rejects that combination.
+        let mut sent_wait_ms = None;
+        if let (StateRoot::Latest, Some(wait)) = (request.state_root, wait) {
+            sent_wait_ms =
+                super::batch::wait_on_wire(wait.wait_ms, options.timeout_ms, wait.margin_ms);
+            if let Some(sent) = sent_wait_ms {
+                params["waitMs"] = serde_json::json!(sent);
+            }
+        }
         let result = self
             .rpc_raw(
                 "get_inclusion_proofs.v1",
@@ -851,8 +987,53 @@ impl BatchAggregatorClient for HttpAggregatorClient {
                 &[],
                 Some(Duration::from_millis(options.timeout_ms.max(1))),
             )
-            .map_err(batch_failure)?;
-        decode_batch_result(&result)
+            .map_err(|f| batch_failure_waited(f, sent_wait_ms))?;
+        let (batch, waited_ms) =
+            decode_batch_result(&result).map_err(|f| WaitedFailure::new(f, None, sent_wait_ms))?;
+        Ok(WaitedBatch::new(batch, waited_ms, sent_wait_ms))
+    }
+}
+
+impl BatchAggregatorClient for HttpAggregatorClient {
+    fn get_inclusion_proofs(
+        &self,
+        request: &BatchRequest<'_>,
+        options: &RequestOptions,
+    ) -> Result<InclusionProofBatch, BatchFailure> {
+        self.batch_call(request, options, None)
+            .map(|waited| waited.batch)
+            .map_err(|e| e.failure)
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn get_inclusion_proofs_with_wait(
+        &self,
+        request: &BatchRequest<'_>,
+        options: &RequestOptions,
+        wait: &WaitRequest,
+    ) -> Result<WaitedBatch, WaitedFailure> {
+        self.batch_call(request, options, Some(wait))
+    }
+}
+
+/// [`batch_failure`] plus `error.data.waitedMs`. A malformed echo is a protocol
+/// error (and carries no echo).
+fn batch_failure_waited(failure: RawFailure, sent_wait_ms: Option<u64>) -> WaitedFailure {
+    let echo = match &failure {
+        RawFailure::Http {
+            rpc: Some(EnvelopeError::Rpc { data, .. }),
+            ..
+        }
+        | RawFailure::Envelope(EnvelopeError::Rpc { data, .. }) => {
+            data.as_ref().and_then(|d| d.get("waitedMs")).cloned()
+        }
+        _ => None,
+    };
+    let failure = batch_failure(failure);
+    match echo.as_ref().map(parse_waited_ms) {
+        None => WaitedFailure::new(failure, None, sent_wait_ms),
+        Some(Ok(ms)) => WaitedFailure::new(failure, Some(ms), sent_wait_ms),
+        Some(Err(m)) => WaitedFailure::new(BatchFailure::Decode(m), None, sent_wait_ms),
     }
 }
 
@@ -860,7 +1041,7 @@ fn batch_failure(failure: RawFailure) -> BatchFailure {
     match failure {
         RawFailure::Http { rpc: Some(e), .. } => batch_failure(RawFailure::Envelope(e)),
         RawFailure::Http { status, .. } => BatchFailure::Http { status },
-        RawFailure::Transport(m) if m.contains("timed out") => BatchFailure::Timeout,
+        RawFailure::TimedOut(_) => BatchFailure::Timeout,
         RawFailure::Transport(m) => BatchFailure::Transport(m),
         RawFailure::TooLarge(limit) => BatchFailure::TooLarge { limit },
         RawFailure::Config(e) => BatchFailure::Transport(e.to_string()),
@@ -916,15 +1097,25 @@ fn parse_indexes(value: &serde_json::Value) -> BTreeMap<String, Vec<usize>> {
     }
 }
 
-/// Decode `{"proofs": [<hex CBOR>...], "partitionView": <hex CBOR>?}`.
-fn decode_batch_result(result: &serde_json::Value) -> Result<InclusionProofBatch, BatchFailure> {
+/// Decode `{"proofs": [<hex CBOR>...], "partitionView": <hex CBOR>?, "waitedMs": n?}`
+/// into the batch and the optional echo.
+fn decode_batch_result(
+    result: &serde_json::Value,
+) -> Result<(InclusionProofBatch, Option<u64>), BatchFailure> {
     let bad = |m: &str| BatchFailure::Decode(m.to_string());
     let object = result
         .as_object()
         .ok_or_else(|| bad("batch result must be an object"))?;
-    if object.keys().any(|k| k != "proofs" && k != "partitionView") {
+    if object
+        .keys()
+        .any(|k| k != "proofs" && k != "partitionView" && k != "waitedMs")
+    {
         return Err(bad("unknown field in batch result"));
     }
+    let waited_ms = match object.get("waitedMs") {
+        None => None,
+        Some(v) => Some(parse_waited_ms(v).map_err(BatchFailure::Decode)?),
+    };
     let hex_field = |v: &serde_json::Value| -> Result<Vec<u8>, BatchFailure> {
         let s = v.as_str().ok_or_else(|| bad("expected a hex string"))?;
         if s.len() > MAX_PROOF_HEX_CHARS {
@@ -963,10 +1154,13 @@ fn decode_batch_result(result: &serde_json::Value) -> Result<InclusionProofBatch
                 .map_err(|e| BatchFailure::Decode(e.to_string()))?,
         ),
     };
-    Ok(InclusionProofBatch {
-        proofs,
-        partition_view,
-    })
+    Ok((
+        InclusionProofBatch {
+            proofs,
+            partition_view,
+        },
+        waited_ms,
+    ))
 }
 
 /// A random JSON-RPC request id.
