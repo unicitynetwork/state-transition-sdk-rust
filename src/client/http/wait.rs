@@ -320,7 +320,12 @@ impl HttpAggregatorClient {
                 continue;
             }
             // `error.data.waitedMs` of a handled error: a server that echoes understood `waitMs`.
-            let error_echo = raw.as_ref().err().and_then(error_echo_of);
+            // Read only when this call sent `waitMs`; otherwise the metadata is ignored, even if malformed.
+            let error_echo = raw
+                .as_ref()
+                .err()
+                .and_then(error_echo_of)
+                .filter(|_| plan.wait_ms.is_some());
             // An overload answer (503, 429, -32006, `data.retryable`) is inconclusive: pause
             // max(interval, Retry-After) or, when that does not fit the time left, fail now
             // with the overload as cause; the rest of this wait sends plain reads (no `waitMs`).
@@ -358,9 +363,6 @@ impl HttpAggregatorClient {
                     // only. An error that does echo keeps long-poll on; a malformed echo
                     // is a protocol error.
                     if let Some(echo) = &error_echo {
-                        if plan.wait_ms.is_none() {
-                            return Err(HttpError::Decode(UNSOLICITED_ECHO.to_string()));
-                        }
                         parse_waited_ms(echo).map_err(HttpError::Decode)?;
                     } else if plan.wait_ms.is_some() {
                         send_wait = false;

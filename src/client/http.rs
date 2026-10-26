@@ -1257,14 +1257,9 @@ impl AggregatorClient for HttpAggregatorClient {
                 }
                 continue;
             }
-            // this loop sends no `waitMs`: an echo on an error is unsolicited
-            let echoed = raw.as_ref().err().and_then(error_echo_of).is_some();
             let result = match raw.map_err(raw_to_http) {
                 Ok(result) => result,
                 Err(HttpError::Rpc { code, .. }) if code == RPC_INCLUSION_PENDING => {
-                    if echoed {
-                        return Err(HttpError::Decode(UNSOLICITED_ECHO.to_string()));
-                    }
                     unknown_seen = 0;
                     if attempt + 1 < self.poll_attempts {
                         std::thread::sleep(self.poll_interval);
@@ -1489,15 +1484,13 @@ impl BatchAggregatorClient for HttpAggregatorClient {
     }
 }
 
-/// [`batch_failure`] plus `error.data.waitedMs`. A malformed or unsolicited echo
-/// is a protocol error (and carries no echo).
+/// [`batch_failure`] plus `error.data.waitedMs`. A malformed echo is a protocol
+/// error (and carries no echo). An error to a request that sent no `waitMs` has
+/// no echo to read: its metadata is ignored, even if malformed, and the error
+/// keeps its classification.
 fn batch_failure_waited(failure: RawFailure, sent_wait_ms: Option<u64>) -> WaitedFailure {
-    let echo = error_echo_of(&failure);
+    let echo = error_echo_of(&failure).filter(|_| sent_wait_ms.is_some());
     let failure = batch_failure(failure);
-    if echo.is_some() && sent_wait_ms.is_none() {
-        let m = UNSOLICITED_ECHO.to_string();
-        return WaitedFailure::new(BatchFailure::Decode(m), None, sent_wait_ms);
-    }
     match echo.as_ref().map(parse_waited_ms) {
         None => WaitedFailure::new(failure, None, sent_wait_ms),
         Some(Ok(ms)) => WaitedFailure::new(failure, Some(ms), sent_wait_ms),
@@ -1927,14 +1920,32 @@ mod tests {
             decode_batch_result(&body, false),
             Err(BatchFailure::Decode(_))
         ));
-        // the echo of an error answer to a request without `waitMs` is not read either
-        let failure = RawFailure::Envelope(EnvelopeError::Rpc {
-            code: -32603,
-            message: "x".into(),
-            data: Some(serde_json::json!({"waitedMs": -1})),
-            retry_after: None,
-        });
-        assert_eq!(batch_failure_waited(failure, None).waited_ms, None);
+    }
+
+    #[test]
+    fn an_unsolicited_error_echo_is_ignored_and_the_error_keeps_its_classification() {
+        let busy = |echo: serde_json::Value| {
+            RawFailure::Envelope(EnvelopeError::Rpc {
+                code: -32006,
+                message: "busy".into(),
+                data: Some(serde_json::json!({"retryable": true, "waitedMs": echo})),
+                retry_after: None,
+            })
+        };
+        let plain = batch_failure(busy(serde_json::json!(0)));
+        assert!(matches!(plain, BatchFailure::Rpc { code: -32006, .. }));
+        for echo in [
+            serde_json::json!(-1),
+            serde_json::json!("x"),
+            serde_json::json!(7),
+        ] {
+            let w = batch_failure_waited(busy(echo.clone()), None);
+            assert_eq!(w.failure, plain, "{echo}");
+            assert_eq!(w.waited_ms, None);
+        }
+        // on a request that sent `waitMs` a malformed echo is still a protocol error
+        let w = batch_failure_waited(busy(serde_json::json!(-1)), Some(1000));
+        assert!(matches!(w.failure, BatchFailure::Decode(_)));
     }
 
     #[test]

@@ -519,9 +519,9 @@ fn a_positive_echo_with_a_zero_interval_keeps_the_pause_floor() {
 }
 
 #[test]
-fn an_echo_to_a_request_that_sent_no_wait_is_a_protocol_error() {
+fn an_echo_to_a_request_that_sent_no_wait_is_a_protocol_error_in_results_only() {
     let (e, f) = (empty(), full());
-    // a valid echo, a malformed echo and an error echo, each unsolicited on a plain read
+    // a valid and a malformed echo in a result, each unsolicited on a plain read
     for body in [
         format!(r#"{{"proof":"{f}","waitedMs":5}}"#),
         format!(r#"{{"proof":"{e}","status":"pending","waitedMs":-1}}"#),
@@ -532,14 +532,19 @@ fn an_echo_to_a_request_that_sent_no_wait_is_a_protocol_error() {
         assert!(matches!(err, HttpError::Decode(_)), "{err:?}");
         assert_eq!(wait_param(&server, 0), None);
     }
-    let server = Scripted::start(|_, _| {
-        Reply::error(r#"{"code":-32021,"message":"pending","data":{"waitedMs":0}}"#)
+    // error metadata is another rule: unsolicited (even malformed) `data.waitedMs` is ignored and the
+    // error keeps its classification, here pending then an overload (-32006), then the proof
+    let f3 = f.clone();
+    let server = Scripted::start(move |i, _| match i {
+        0 => Reply::error(r#"{"code":-32021,"message":"pending","data":{"waitedMs":-1}}"#),
+        1 => Reply::error(
+            r#"{"code":-32006,"message":"busy","data":{"retryable":true,"waitedMs":"x"}}"#,
+        ),
+        _ => Reply::result(format!("\"{f3}\"")),
     });
     let c = client(&server.url, 5).with_long_poll(false);
-    assert!(matches!(
-        c.get_inclusion_proof(&state_id(7)),
-        Err(HttpError::Decode(_))
-    ));
+    assert!(c.get_inclusion_proof(&state_id(7)).is_ok());
+    assert_eq!(server.count(), 3);
     // a plain read inside a wait (after the wait was dropped) is the same
     let (e2, f2) = (e.clone(), f.clone());
     let server = Scripted::start(move |i, _| match i {
