@@ -145,7 +145,11 @@ fn a_missing_echo_drops_the_wait_for_the_rest_of_the_call_and_paces() {
 #[test]
 fn a_zero_echo_keeps_asking_but_never_loops_tightly() {
     let e = empty();
-    let server = Scripted::start(move |_, _| Reply::result(obj(&e, Some("pending"), Some(0))));
+    let server = Scripted::start(move |_, seen| {
+        // a server echoes only a wait it was asked for
+        let echo = seen.params.get("waitMs").map(|_| 0);
+        Reply::result(obj(&e, Some("pending"), echo))
+    });
     let c = client(&server.url, 100);
     let out = c.wait_for_inclusion_proof_with_stats(&state_id(7), &WaitOptions::new(secs(3)));
     assert!(matches!(out.result, Err(HttpError::Timeout)));
@@ -300,7 +304,11 @@ fn a_malformed_echo_is_rejected_and_never_extends_anything() {
 #[test]
 fn the_total_deadline_is_not_renewed_by_repeated_calls() {
     let e = empty();
-    let server = Scripted::start(move |_, _| Reply::result(obj(&e, Some("pending"), Some(0))));
+    let server = Scripted::start(move |_, seen| {
+        // a server echoes only a wait it was asked for
+        let echo = seen.params.get("waitMs").map(|_| 0);
+        Reply::result(obj(&e, Some("pending"), echo))
+    });
     let c = client(&server.url, 50);
     let started = Instant::now();
     let r = c.wait_for_inclusion_proof(&state_id(7), &WaitOptions::new(Duration::from_millis(700)));
@@ -511,19 +519,36 @@ fn a_positive_echo_with_a_zero_interval_keeps_the_pause_floor() {
 }
 
 #[test]
-fn an_echo_to_a_request_that_sent_no_wait_is_ignored() {
+fn an_echo_to_a_request_that_sent_no_wait_is_a_protocol_error() {
     let (e, f) = (empty(), full());
-    // a malformed `waitedMs` next to the proof of a plain read: not read, so not a protocol error
-    let (e2, f2) = (e.clone(), f.clone());
-    let server = Scripted::start(move |i, _| match i {
-        0 => Reply::result(format!(
-            r#"{{"proof":"{e2}","status":"pending","waitedMs":-1}}"#
-        )),
-        _ => Reply::result(format!(r#"{{"proof":"{f2}","waitedMs":"x"}}"#)),
+    // a valid echo, a malformed echo and an error echo, each unsolicited on a plain read
+    for body in [
+        format!(r#"{{"proof":"{f}","waitedMs":5}}"#),
+        format!(r#"{{"proof":"{e}","status":"pending","waitedMs":-1}}"#),
+    ] {
+        let server = Scripted::start(move |_, _| Reply::result(body.clone()));
+        let c = client(&server.url, 5).with_long_poll(false);
+        let err = c.get_inclusion_proof(&state_id(7)).unwrap_err();
+        assert!(matches!(err, HttpError::Decode(_)), "{err:?}");
+        assert_eq!(wait_param(&server, 0), None);
+    }
+    let server = Scripted::start(|_, _| {
+        Reply::error(r#"{"code":-32021,"message":"pending","data":{"waitedMs":0}}"#)
     });
     let c = client(&server.url, 5).with_long_poll(false);
-    assert!(c.get_inclusion_proof(&state_id(7)).is_ok());
-    assert_eq!(wait_param(&server, 0), None);
+    assert!(matches!(
+        c.get_inclusion_proof(&state_id(7)),
+        Err(HttpError::Decode(_))
+    ));
+    // a plain read inside a wait (after the wait was dropped) is the same
+    let (e2, f2) = (e.clone(), f.clone());
+    let server = Scripted::start(move |i, _| match i {
+        0 => Reply::result(format!(r#"{{"proof":"{e2}","status":"pending"}}"#)),
+        _ => Reply::result(format!(r#"{{"proof":"{f2}","waitedMs":5}}"#)),
+    });
+    let out =
+        client(&server.url, 5).wait_for_inclusion_proof(&state_id(7), &WaitOptions::new(secs(5)));
+    assert!(matches!(out, Err(HttpError::Decode(_))), "{out:?}");
     // the same malformed echo on a request that did send `waitMs` stays a protocol error
     let server = Scripted::start(move |_, _| {
         Reply::result(format!(

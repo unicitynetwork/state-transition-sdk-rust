@@ -1257,9 +1257,14 @@ impl AggregatorClient for HttpAggregatorClient {
                 }
                 continue;
             }
+            // this loop sends no `waitMs`: an echo on an error is unsolicited
+            let echoed = raw.as_ref().err().and_then(error_echo_of).is_some();
             let result = match raw.map_err(raw_to_http) {
                 Ok(result) => result,
                 Err(HttpError::Rpc { code, .. }) if code == RPC_INCLUSION_PENDING => {
+                    if echoed {
+                        return Err(HttpError::Decode(UNSOLICITED_ECHO.to_string()));
+                    }
                     unknown_seen = 0;
                     if attempt + 1 < self.poll_attempts {
                         std::thread::sleep(self.poll_interval);
@@ -1318,7 +1323,7 @@ struct V2Result {
 /// object is `{proof, status?, waitedMs?}`. A present `waitedMs` must be a plain
 /// non-negative safe integer; anything else is a protocol error. Unknown object
 /// fields stay ignored, as before. `wait_sent` is whether the request carried
-/// `waitMs`: an echo to a request that did not ask is not validated or reported.
+/// `waitMs`: an echo to a request that did not ask is a protocol error, malformed or not.
 fn decode_v2_result(result: &serde_json::Value, wait_sent: bool) -> Result<V2Result, HttpError> {
     let (encoded, status, waited_ms) = if let Some(s) = result.as_str() {
         (s, None, None)
@@ -1335,8 +1340,9 @@ fn decode_v2_result(result: &serde_json::Value, wait_sent: bool) -> Result<V2Res
             .and_then(|v| v.as_str())
             .and_then(ProofStatus::from_wire);
         let waited_ms = match object.get("waitedMs") {
-            Some(v) if wait_sent => Some(parse_waited_ms(v).map_err(HttpError::Decode)?),
-            _ => None,
+            Some(_) if !wait_sent => return Err(HttpError::Decode(UNSOLICITED_ECHO.to_string())),
+            Some(v) => Some(parse_waited_ms(v).map_err(HttpError::Decode)?),
+            None => None,
         };
         (proof, status, waited_ms)
     };
@@ -1351,6 +1357,21 @@ fn decode_v2_result(result: &serde_json::Value, wait_sent: bool) -> Result<V2Res
         status,
         waited_ms,
     })
+}
+
+/// A `waitedMs` echo to a request that sent no `waitMs`.
+const UNSOLICITED_ECHO: &str = "waitedMs echoed to a request without waitMs";
+
+/// `error.data.waitedMs` of a failed call, if the error carries one.
+fn error_echo_of(failure: &RawFailure) -> Option<serde_json::Value> {
+    match failure {
+        RawFailure::Envelope(EnvelopeError::Rpc { data, .. })
+        | RawFailure::Http {
+            rpc: Some(EnvelopeError::Rpc { data, .. }),
+            ..
+        } => data.as_ref().and_then(|d| d.get("waitedMs")).cloned(),
+        _ => None,
+    }
 }
 
 /// A `waitedMs` echo: a JSON integer in `[0, 2^53 - 1]`. Floats (`1.0`, `1e3`),
@@ -1468,22 +1489,15 @@ impl BatchAggregatorClient for HttpAggregatorClient {
     }
 }
 
-/// [`batch_failure`] plus `error.data.waitedMs`. A malformed echo is a protocol
-/// error (and carries no echo).
+/// [`batch_failure`] plus `error.data.waitedMs`. A malformed or unsolicited echo
+/// is a protocol error (and carries no echo).
 fn batch_failure_waited(failure: RawFailure, sent_wait_ms: Option<u64>) -> WaitedFailure {
-    // an echo to a request that sent no `waitMs` is not ours to read
-    let echo = match &failure {
-        _ if sent_wait_ms.is_none() => None,
-        RawFailure::Http {
-            rpc: Some(EnvelopeError::Rpc { data, .. }),
-            ..
-        }
-        | RawFailure::Envelope(EnvelopeError::Rpc { data, .. }) => {
-            data.as_ref().and_then(|d| d.get("waitedMs")).cloned()
-        }
-        _ => None,
-    };
+    let echo = error_echo_of(&failure);
     let failure = batch_failure(failure);
+    if echo.is_some() && sent_wait_ms.is_none() {
+        let m = UNSOLICITED_ECHO.to_string();
+        return WaitedFailure::new(BatchFailure::Decode(m), None, sent_wait_ms);
+    }
     match echo.as_ref().map(parse_waited_ms) {
         None => WaitedFailure::new(failure, None, sent_wait_ms),
         Some(Ok(ms)) => WaitedFailure::new(failure, Some(ms), sent_wait_ms),

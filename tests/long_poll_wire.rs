@@ -141,11 +141,11 @@ fn v2_malformed_echo_is_a_protocol_error() {
             )
             .unwrap_err();
         assert!(matches!(err, HttpError::Decode(_)), "{bad}: {err}");
-        // A read that sent no `waitMs` has no echo to validate: the same body is not a protocol error.
-        assert!(
-            client(&server.url).lookup_inclusion_proof(&sid()).is_ok(),
-            "plain {bad}"
-        );
+        // A read that sent no `waitMs` was not echoed to: the same body is a protocol error.
+        let err = client(&server.url)
+            .lookup_inclusion_proof(&sid())
+            .unwrap_err();
+        assert!(matches!(err, HttpError::Decode(_)), "plain {bad}: {err}");
     }
     // The maximum safe integer is fine.
     let h = hexp.clone();
