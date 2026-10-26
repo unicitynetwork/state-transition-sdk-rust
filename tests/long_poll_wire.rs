@@ -141,9 +141,11 @@ fn v2_malformed_echo_is_a_protocol_error() {
             )
             .unwrap_err();
         assert!(matches!(err, HttpError::Decode(_)), "{bad}: {err}");
-        // The legacy poller rejects the same malformed metadata.
-        let err = client(&server.url).get_inclusion_proof(&sid()).unwrap_err();
-        assert!(matches!(err, HttpError::Decode(_)), "legacy {bad}: {err}");
+        // A read that sent no `waitMs` was not echoed to: the same body is a protocol error.
+        let err = client(&server.url)
+            .lookup_inclusion_proof(&sid())
+            .unwrap_err();
+        assert!(matches!(err, HttpError::Decode(_)), "plain {bad}: {err}");
     }
     // The maximum safe integer is fine.
     let h = hexp.clone();
@@ -485,11 +487,13 @@ fn batch_success_echo_is_decoded_and_strictly_validated() {
             .get_inclusion_proofs_with_wait(&latest, &opts(20_000), &WaitRequest::new(5_000))
             .unwrap();
         assert_eq!((ok.batch.proofs.len(), ok.waited_ms), (2, want), "{extra}");
-        // The plain call decodes the same body (an unrequested echo is admitted).
-        let plain = client(&server.url)
-            .get_inclusion_proofs(&latest, &opts(5_000))
-            .unwrap();
-        assert_eq!(plain, ok.batch);
+        // The plain call sent no `waitMs`: an echo is an unknown field, as in the base.
+        let plain = client(&server.url).get_inclusion_proofs(&latest, &opts(5_000));
+        if extra.is_empty() {
+            assert_eq!(plain.unwrap(), ok.batch);
+        } else {
+            assert!(matches!(plain, Err(BatchFailure::Decode(_))), "{extra}");
+        }
     }
     for bad in [
         r#","waitedMs":-1"#,
