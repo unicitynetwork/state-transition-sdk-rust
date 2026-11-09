@@ -5,7 +5,7 @@
 //!   re-encoding, genesis and tip ids and epochs, the explicit name -> network mapping (mainnet 1, testnet2 4), the bundle digest.
 //! * The manifest has the canonical form (sorted keys, two-space indent, trailing newline) and describes exactly the files present.
 //! * Regeneration must leave no diff: `UTB_RELEASE_PINS_UPDATE=1 cargo test --test release_pins` rewrites the generated file.
-//! * The bundles are byte-identical to unicitynetwork/unicity-ids#11 (head `source.commit`); if that PR's files change, the bundles and
+//! * The bundles are byte-identical to unicitynetwork/unicity-ids#11 (merge commit `source.commit`); if that PR's files change, the bundles and
 //!   the manifest are regenerated and reviewed again. A new release must extend the previous release's checkpoint (a changed lineage or a
 //!   rollback is an explicit trust decision, never regenerated silently).
 #![cfg(feature = "std")]

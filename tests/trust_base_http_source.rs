@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use unicity_token::api::bft::trust_base_update::{Snapshot, TrustBaseRequest, TrustBaseSource};
 use unicity_token::api::NetworkId;
-use unicity_token::client::HttpAggregatorClient;
+use unicity_token::client::{HttpAggregatorClient, SdkVersionHeader};
 
 /// Serve `reply` (a complete HTTP response) to each request and record the request heads.
 fn serve(reply: Vec<u8>) -> (String, Arc<Mutex<Vec<String>>>) {
@@ -74,6 +74,32 @@ fn the_query_is_on_the_origin_whatever_path_the_rpc_url_has() {
             "ab".repeat(32)
         )
     );
+}
+
+#[test]
+fn the_trust_base_get_carries_the_sdk_version_header_like_every_aggregator_request() {
+    let (url, seen) = serve(ok(&[1]));
+    let client = HttpAggregatorClient::new_insecure_http(url.clone());
+    client.get_trust_base_page(&request(None)).unwrap();
+    let head = seen.lock().unwrap()[0].to_lowercase();
+    assert!(head.contains(&format!(
+        "x-sdk-version: {}",
+        unicity_token::client::SDK_VERSION
+    )));
+    let custom = HttpAggregatorClient::new_insecure_http(url.clone())
+        .with_sdk_version_header(SdkVersionHeader::Custom("wallet/9".into()))
+        .unwrap();
+    custom.get_trust_base_page(&request(None)).unwrap();
+    assert!(seen.lock().unwrap()[1]
+        .to_lowercase()
+        .contains("x-sdk-version: wallet/9"));
+    let off = HttpAggregatorClient::new_insecure_http(url)
+        .with_sdk_version_header(SdkVersionHeader::Off)
+        .unwrap();
+    off.get_trust_base_page(&request(None)).unwrap();
+    assert!(!seen.lock().unwrap()[2]
+        .to_lowercase()
+        .contains("x-sdk-version"));
 }
 
 #[test]

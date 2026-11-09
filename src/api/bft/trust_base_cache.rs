@@ -955,6 +955,19 @@ impl<S: TrustBaseStore> Session<S> {
                 };
             }
             let out = self.history.to_bundle();
+            // Never save what the next open of this session's own limits would refuse as Oversize: the over-budget file would then
+            // block every later flush. The session stays dirty and verified in memory.
+            let limits = &self.options.limits;
+            if out.len() > limits.max_bytes
+                || self.history.entries().len() > limits.max_entries
+                || self
+                    .history
+                    .entries()
+                    .iter()
+                    .any(|e| e.to_cbor().len() > limits.max_entry_bytes)
+            {
+                return Flush::Pending(CacheError::Rejected(CacheReject::Oversize));
+            }
             match self
                 .store
                 .compare_and_swap(&self.key, expected.as_ref(), &out)

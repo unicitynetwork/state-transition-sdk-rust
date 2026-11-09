@@ -22,7 +22,6 @@ use std::time::{Duration, Instant};
 use zeroize::Zeroize;
 
 use crate::api::bft::trust_base_update::{SourceError, TrustBaseRequest, TrustBaseSource};
-use crate::api::bft::TrustBaseHistory;
 use crate::api::certification_request::CertificationRequest;
 use crate::api::inclusion_proof::InclusionProof;
 use crate::api::{
@@ -225,7 +224,7 @@ impl std::error::Error for HttpError {
 pub(crate) fn conflict_error(
     proof: &InclusionProof,
     state_id: &StateId,
-    trust_base: &TrustBaseHistory,
+    trust_base: &(impl crate::verify::TrustAnchor + ?Sized),
 ) -> HttpError {
     match proof.verify_for(state_id, proof.reference_time, trust_base) {
         Ok(()) => HttpError::StateCertifiedWithOtherData,
@@ -500,7 +499,7 @@ impl HttpAggregatorClient {
         &self,
         data: &CertificationData,
         max_resubmits: u32,
-        trust_base: &TrustBaseHistory,
+        trust_base: &(impl crate::verify::TrustAnchor + ?Sized),
     ) -> Result<InclusionProof, HttpError> {
         self.submit_and_wait_with(data, max_resubmits, |proof, state_id| {
             conflict_error(proof, state_id, trust_base)
@@ -812,6 +811,9 @@ impl TrustBaseSource for HttpAggregatorClient {
             .agent
             .get(url.as_str())
             .set("Accept", "application/cbor");
+        if let Some(version) = &self.sdk_version {
+            call = call.set("X-SDK-Version", version);
+        }
         if let Some(key) = &self.api_key {
             call = call.set("X-API-Key", key.expose());
         }

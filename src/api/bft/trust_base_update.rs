@@ -275,10 +275,16 @@ pub fn update(
                     current += 1;
                     break;
                 }
-                // A source that refuses the echoed snapshot as another history may be the honest one: the snapshot came from whichever source
+                // A source that refuses the echoed snapshot (another history, or an end above its tip) may be the honest one: the snapshot came from whichever source
                 // answered the first page, and a hostile first page can announce a fake end. Drop it, start again from the tip and ask the same
-                // source once more without it; a mismatch without a snapshot is final, so this terminates.
-                if page.status == TrustBaseStatus::HistoryMismatch && snapshot.is_some() {
+                // source once more without it; a refusal without a snapshot is final, so this terminates.
+                // The same holds for NotYetAvailable on a snapshot request: a snapshot end above this source's own tip (a fake end from the
+                // first page, or a lagging shard behind a gateway) says nothing against the source's honest history.
+                if matches!(
+                    page.status,
+                    TrustBaseStatus::HistoryMismatch | TrustBaseStatus::NotYetAvailable
+                ) && snapshot.is_some()
+                {
                     causes.push(UpdateCause::Status {
                         source: index,
                         status: page.status,

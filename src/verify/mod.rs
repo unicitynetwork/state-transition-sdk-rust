@@ -2152,6 +2152,18 @@ mod tests {
     }
 
     #[test]
+    fn a_non_inclusion_proof_sealed_in_an_epoch_the_history_lacks_keeps_the_typed_cause() {
+        // like inclusion: not a verdict on the signatures but the retryable missing-entry error, so a caller can fetch the entry and retry
+        let node = signer(0x11);
+        let tb = trust_base(&node);
+        let proof = ni_proof(&node, |uc| resign(uc, &node, |s| s.epoch = 9));
+        assert_eq!(
+            verify_ni(&tb, &proof),
+            Err(VerificationError::UnknownTrustEpoch { epoch: 9 })
+        );
+    }
+
+    #[test]
     fn bound_non_inclusion_proofs_verify_at_a_snapshot() {
         let node = signer(0x11);
         let tb = trust_base(&node);

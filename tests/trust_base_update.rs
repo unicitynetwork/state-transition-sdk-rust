@@ -430,20 +430,53 @@ fn nothing_newer_means_a_tip_below_the_requested_epoch_and_only_without_a_snapsh
     let s = fixed(status_page(3, 2, 1));
     assert_eq!(update(&mut h, &[src(&s)], &one_round), Ok(0));
 
-    // in the middle of a paged range (a snapshot is frozen) the same answer is not "current"
+    // in the middle of a paged range (a snapshot is frozen) the same answer is not "current" by itself: the snapshot is dropped and the
+    // source is asked again from the tip without it; only that answer counts
     let mut h = genesis_only();
     let p1 = page(2, 4, [8; 32], &["epoch2-signed-abc"], Some(3));
     let lag = status_page(3, 3, 2);
     let s = Script::new(move |i, _| Ok(if i == 0 { p1.clone() } else { lag.clone() }));
-    let e = update(&mut h, &[src(&s)], &one_round).unwrap_err();
-    assert_eq!(e.appended, 1);
-    assert_eq!(
-        e.causes,
-        vec![UpdateCause::Status {
-            source: 0,
-            status: TrustBaseStatus::NotYetAvailable
-        }]
-    );
+    assert_eq!(update(&mut h, &[src(&s)], &one_round), Ok(1));
+    let seen = s.seen.borrow();
+    assert_eq!(seen.len(), 3);
+    assert!(seen[1].snapshot.is_some() && seen[2].snapshot.is_none());
+}
+
+/// A hostile first source announces a fake snapshot end above every honest tip; the honest source answers NotYetAvailable to the echoed
+/// snapshot. It is not finally refused: it is asked again without the snapshot and serves its whole history.
+#[test]
+fn a_fake_snapshot_end_above_the_honest_tip_does_not_make_the_honest_source_final() {
+    let mut h = genesis_only();
+    let hostile = Script::new({
+        let p1 = page(2, 1000, [8; 32], &["epoch2-signed-abc"], Some(3));
+        move |_, r| {
+            if r.from_epoch == 2 {
+                Ok(p1.clone())
+            } else {
+                Err(SourceError("gone".into()))
+            }
+        }
+    });
+    let honest_all = case("range from epoch 2 to the tip");
+    let honest_tip = case("range of the tip entry only");
+    let honest = Script::new(move |_, r| {
+        Ok(if r.snapshot.is_some() {
+            status_page(3, 3, 3)
+        } else if r.from_epoch == 2 {
+            honest_all.clone()
+        } else {
+            honest_tip.clone()
+        })
+    });
+    let n = update(
+        &mut h,
+        &[src(&hostile), src(&honest)],
+        &UpdateOptions::default(),
+    )
+    .unwrap();
+    assert!(n >= 2);
+    assert_eq!(h.latest().epoch, 3);
+    assert!(honest.seen.borrow().iter().any(|r| r.snapshot.is_none()));
 }
 
 #[test]

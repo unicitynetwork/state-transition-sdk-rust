@@ -137,7 +137,7 @@ impl TokenDataVerifier for PaymentDataVerifier {
 /// validated payment carried by `token`.
 pub fn verify_payment_token(
     token: &Token,
-    trust_base: &crate::api::bft::TrustBaseHistory,
+    trust_base: &(impl crate::verify::TrustAnchor + ?Sized),
     registry: &MintJustificationRegistry,
     decode_payment_data: PaymentDataDecoder,
 ) -> Result<PaymentAssetCollection, VerificationError> {

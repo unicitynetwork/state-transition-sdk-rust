@@ -106,3 +106,56 @@ fn a_session_appends_flushes_and_reopens_the_largest_entry() {
     assert_eq!(d, vec![Diagnostic::CacheRejected(CacheReject::Oversize)]);
     assert_eq!(s.history().unwrap().latest().epoch, 1);
 }
+
+#[test]
+fn a_flush_never_saves_a_bundle_over_the_sessions_own_limits() {
+    let v = fixture();
+    let genesis_only = {
+        let g = TrustBaseEntry::from_cbor(&hx(&v, "genesis")).unwrap();
+        TrustBaseHistory::from_genesis(g, None).unwrap().to_bundle()
+    };
+    let entry = TrustBaseEntry::from_cbor(&hx(&v, "entry")).unwrap();
+    // two entries against max_entries 1, then a byte limit just below the two-entry bundle
+    let two = hx(&v, "bundle").len();
+    for limits in [
+        BundleLimits {
+            max_entries: 1,
+            ..BundleLimits::default()
+        },
+        BundleLimits {
+            max_bytes: two - 1,
+            ..BundleLimits::default()
+        },
+    ] {
+        let store = MemoryStore::new();
+        let open = |limits: BundleLimits| {
+            block_on(Session::open_in(
+                &[],
+                net(&v),
+                Authority::local(&genesis_only).unwrap(),
+                &store,
+                SessionOptions {
+                    limits,
+                    ..SessionOptions::default()
+                },
+            ))
+        };
+        let (mut s, _) = open(limits).unwrap();
+        assert_eq!(s.append(entry.clone()), Ok(Appended::Added));
+        let over = Flush::Pending(CacheError::Rejected(CacheReject::Oversize));
+        assert_eq!(block_on(s.flush()), over);
+        assert_eq!(store.get(s.key()), None, "nothing over budget is written");
+        // the session stays dirty and verified, and says the same on the next flush
+        assert!(s.is_dirty());
+        assert_eq!(s.history().unwrap().latest().epoch, 2);
+        assert_eq!(block_on(s.flush()), over);
+        drop(s);
+        // a session whose limits fit the history saves it
+        let (mut s, _) = open(BundleLimits::default()).unwrap();
+        assert_eq!(s.append(entry.clone()), Ok(Appended::Added));
+        assert!(matches!(
+            block_on(s.flush()),
+            Flush::Saved { wrote: true, .. }
+        ));
+    }
+}

@@ -1,6 +1,6 @@
 # Maximum-size trust base entry (shared fixture)
 
-`max-entry.json` is vendored byte for byte from `ristik/bft-go-base`, path `testdata/trust-base-v2/max-entry/v1/max-entry.json`, commit `81ee667` (branch `utb/gettrustbase-codec`, PR #4); never edit this copy.
+`max-entry.json` is vendored byte for byte from `unicitynetwork/bft-go-base`, path `testdata/trust-base-v2/max-entry/v1/max-entry.json`, commit `dbf94198f25eaafd5e97f8af29969f7374f9b303` (merged as #20; the same bytes as at the earlier `81ee667` of ristik/bft-go-base `utb/gettrustbase-codec`); never edit this copy.
 
 SHA-256: `c4c5970307c1780fa08108529e3ef9e37803726b6df1843d61c8421f97a795b6`
 

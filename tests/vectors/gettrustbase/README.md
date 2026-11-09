@@ -3,6 +3,7 @@
 `vectors.json` is vendored byte for byte, not generated here:
 
 - source: `ristik/bft-core`, branch `integration/enshrined-evm`, squash commit `5d9a8eaa211b480fc37227d41eebd912ef1440c5` (PR #928), `gettrustbase/testdata/v1/vectors.json`, 45 cases (reference codec: `gettrustbase/codec.go`); the same bytes as the JS SDK's copy.
+- also at `testdata/trust-base-response/v1/vectors.json` of unicitynetwork/bft-go-base `dbf94198f25eaafd5e97f8af29969f7374f9b303` (merged #20), the same bytes.
 - sha256: `3f9732fa5d5bed202d326f452f732d625040dbfac81857e19574df25bde3734c`
 - never edit this copy; regenerate at the source.
 
