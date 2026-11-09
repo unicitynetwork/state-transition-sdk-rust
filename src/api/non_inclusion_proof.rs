@@ -127,12 +127,12 @@ impl NonInclusionProof {
     /// metadata for this check.**
     ///
     /// ```no_run
-    /// # use unicity_token::api::{bft::RootTrustBase, NonInclusionProof};
+    /// # use unicity_token::api::{bft::TrustBaseHistory, NonInclusionProof};
     /// # use unicity_token::verify::{NonInclusionContext, NonInclusionOutcome};
     /// # struct Checkpoint { network_id: u16, required_root_round: u64 }
     /// # fn policy(
     /// #     proof: &NonInclusionProof,
-    /// #     trust_base: &RootTrustBase,
+    /// #     trust_base: &TrustBaseHistory,
     /// #     checkpoint: &Checkpoint, // obtained independently of the proof and of the server response
     /// # ) -> Result<(), &'static str> {
     /// let outcome = proof

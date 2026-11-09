@@ -16,8 +16,8 @@ use super::{
     SplitOutputPayload, SplitTokenRequest, TokenSplit,
 };
 use crate::api::bft::{
-    InputRecord, RootTrustBase, RootTrustBaseNodeInfo, ShardId, ShardTreeCertificate,
-    UnicityCertificate, UnicitySeal, UnicityTreeCertificate,
+    InputRecord, ShardId, ShardTreeCertificate, TrustBaseHistory, UnicityCertificate, UnicitySeal,
+    UnicityTreeCertificate,
 };
 use crate::api::calculate_leaf_value;
 use crate::api::inclusion_proof::InclusionProof;
@@ -53,16 +53,13 @@ fn sig_pred(s: &Secp256k1Signer) -> EncodedPredicate {
     SignaturePredicate::new(s.public_key()).to_encoded()
 }
 
-fn node_info(s: &Secp256k1Signer, id: &str) -> RootTrustBaseNodeInfo {
-    RootTrustBaseNodeInfo {
-        node_id: id.to_string(),
-        signing_key: s.public_key(),
-        stake: 1,
-    }
-}
-
-fn trust_base(node: &Secp256k1Signer) -> RootTrustBase {
-    RootTrustBase::new(0, NetworkId::LOCAL, 0, 0, vec![node_info(node, "NODE")], 1)
+fn trust_base(node: &Secp256k1Signer) -> TrustBaseHistory {
+    crate::test_support::history_of(
+        NetworkId::LOCAL,
+        1,
+        1,
+        vec![("NODE".to_string(), node.public_key(), 1)],
+    )
 }
 
 fn empty_shard() -> ShardId {
@@ -73,7 +70,7 @@ fn mk_seal(hash: Vec<u8>, signatures: Vec<(String, Vec<u8>)>) -> UnicitySeal {
     UnicitySeal {
         network_id: NetworkId::LOCAL,
         root_chain_round_number: 1,
-        epoch: 0,
+        epoch: 1,
         timestamp: REFERENCE_TIME,
         previous_hash: None,
         hash,
@@ -93,7 +90,7 @@ fn leaf_root(state_id: &StateId, tx_hash: &DataHash) -> [u8; 32] {
 fn signed_uc(node: &Secp256k1Signer, root: [u8; 32]) -> UnicityCertificate {
     let input_record = InputRecord {
         round_number: 0,
-        epoch: 0,
+        epoch: 1,
         previous_hash: None,
         hash: Some(root.to_vec()),
         summary_value: Some(Vec::new()),
@@ -267,7 +264,7 @@ fn authorize_test_payment(
 
 /// Build the full positive scenario, returning everything needed by the tests.
 struct Scenario {
-    tb: RootTrustBase,
+    tb: TrustBaseHistory,
     node: Secp256k1Signer,
     source: Token,
     alice: Secp256k1Signer,
@@ -880,7 +877,7 @@ fn wrapped_source(node: &Secp256k1Signer, owner: &Secp256k1Signer, amount: u32) 
 /// Split `source` (owned by `owner`) and mint every output with exactly the
 /// bytes the split returned.
 fn split_and_mint(
-    tb: &RootTrustBase,
+    tb: &TrustBaseHistory,
     node: &Secp256k1Signer,
     owner: &Secp256k1Signer,
     source: &Token,

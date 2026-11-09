@@ -19,9 +19,8 @@ all-features = true
 default = ["std", "client"]
 # alloc is always required by the core (Vec/BTreeMap for CBOR + structures).
 alloc = []
-# std enables std error integration, host RNG conveniences, JSON trust-base
-# parsing, and pulls std in deps.
-std = ["alloc", "k256/std", "sha2/std", "dep:getrandom", "dep:serde_json"]
+# std enables std error integration, host RNG conveniences, and pulls std in deps.
+std = ["alloc", "k256/std", "sha2/std", "dep:getrandom"]
 # client adds transaction construction, signing, and the mint/transfer flow
 # over a caller-supplied AggregatorClient transport.
 client = ["alloc"]
@@ -29,7 +28,7 @@ client = ["alloc"]
 file-cache = ["std"]
 # http adds a blocking JSON-RPC AggregatorClient for talking to a live
 # aggregator/gateway (host only; pulls in a TLS HTTP stack).
-http = ["std", "client", "dep:ureq", "dep:url", "dep:zeroize"]
+http = ["std", "client", "dep:serde_json", "dep:ureq", "dep:url", "dep:zeroize"]
 
 [dependencies]
 sha2 = { version = "0.10", default-features = false }
@@ -46,6 +45,8 @@ zeroize = { version = "1", optional = true }
 
 [dev-dependencies]
 hex-literal = "0.4"
+# JSON test vectors.
+serde_json = "1"
 # Loads e2e/.env for the live examples.
 dotenvy = "0.15"
 

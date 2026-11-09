@@ -18,7 +18,7 @@ use super::asset::PaymentAssetCollection;
 use super::commitment::split_output_commitment;
 use super::manifest::SplitManifest;
 use super::verifier::{verify_payment_token, PaymentDataDecoder};
-use crate::api::bft::RootTrustBase;
+use crate::api::bft::TrustBaseHistory;
 use crate::api::network_id::NetworkId;
 use crate::error::Error;
 use crate::predicate::builtin::BurnPredicate;
@@ -213,7 +213,7 @@ impl TokenSplit {
     /// means, use [`TokenSplit::split_unchecked`].
     pub fn split(
         token: &Token,
-        trust_base: &RootTrustBase,
+        trust_base: &TrustBaseHistory,
         registry: &MintJustificationRegistry,
         decode_payment_data: PaymentDataDecoder,
         requests: Vec<SplitTokenRequest>,

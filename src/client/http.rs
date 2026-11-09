@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use zeroize::Zeroize;
 
 use crate::api::bft::trust_base_update::{SourceError, TrustBaseRequest, TrustBaseSource};
-use crate::api::bft::RootTrustBase;
+use crate::api::bft::TrustBaseHistory;
 use crate::api::certification_request::CertificationRequest;
 use crate::api::inclusion_proof::InclusionProof;
 use crate::api::{
@@ -225,7 +225,7 @@ impl std::error::Error for HttpError {
 pub(crate) fn conflict_error(
     proof: &InclusionProof,
     state_id: &StateId,
-    trust_base: &RootTrustBase,
+    trust_base: &TrustBaseHistory,
 ) -> HttpError {
     match proof.verify_for(state_id, proof.reference_time, trust_base) {
         Ok(()) => HttpError::StateCertifiedWithOtherData,
@@ -500,7 +500,7 @@ impl HttpAggregatorClient {
         &self,
         data: &CertificationData,
         max_resubmits: u32,
-        trust_base: &RootTrustBase,
+        trust_base: &TrustBaseHistory,
     ) -> Result<InclusionProof, HttpError> {
         self.submit_and_wait_with(data, max_resubmits, |proof, state_id| {
             conflict_error(proof, state_id, trust_base)

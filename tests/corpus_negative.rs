@@ -23,8 +23,7 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use unicity_token::api::bft::root_trust_base::RootTrustBaseNodeInfo;
-use unicity_token::api::bft::{RootTrustBase, ShardId};
+use unicity_token::api::bft::{ShardId, TrustBaseHistory};
 use unicity_token::api::{InclusionProofResponse, NetworkId, StateId};
 use unicity_token::cbor::Decoder;
 use unicity_token::client::{
@@ -34,6 +33,9 @@ use unicity_token::client::{
 use unicity_token::consolidation::{PartitionTopology, PartitionViewError};
 use unicity_token::crypto::signature::PublicKey;
 use unicity_token::verify::VerificationError;
+
+mod common;
+use common::history_of;
 
 fn corpus_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/vectors/uc-consolidation/corpus-v1")
@@ -72,7 +74,7 @@ fn shard(bits: &str) -> ShardId {
     id
 }
 
-fn trust_base(bytes: &[u8]) -> RootTrustBase {
+fn trust_base(bytes: &[u8]) -> TrustBaseHistory {
     let items = Decoder::new(bytes)
         .expect_tag(39000)
         .unwrap()
@@ -84,22 +86,26 @@ fn trust_base(bytes: &[u8]) -> RootTrustBase {
         .into_iter()
         .map(|n| {
             let f = n.array(Some(3)).unwrap();
-            RootTrustBaseNodeInfo {
-                node_id: f[0].text().unwrap().into(),
-                signing_key: PublicKey::from_bytes(f[1].bytes_value().unwrap()).unwrap(),
-                stake: f[2].uint().unwrap(),
-            }
+            (
+                f[0].text().unwrap().to_string(),
+                PublicKey::from_bytes(f[1].bytes_value().unwrap()).unwrap(),
+                f[2].uint().unwrap(),
+            )
         })
-        .collect();
-    RootTrustBase::try_new(
-        items[0].uint().unwrap(),
+        .collect::<Vec<_>>();
+    // the history derives its quorum as floor(2W/3)+1: the fixture must record the same
+    let total: u64 = nodes.iter().map(|n| n.2).sum();
+    assert_eq!(
+        items[5].uint().unwrap(),
+        total * 2 / 3 + 1,
+        "fixture quorum threshold is not representable"
+    );
+    history_of(
         NetworkId::new(items[1].uint().unwrap() as u16).unwrap(),
         items[2].uint().unwrap(),
         items[3].uint().unwrap(),
         nodes,
-        items[5].uint().unwrap(),
     )
-    .unwrap()
 }
 
 // ---------------------------------------------------------------- scripted server
@@ -253,9 +259,13 @@ fn run(files: &Files) -> Got {
 fn seal_class(e: &VerificationError) -> String {
     use VerificationError::*;
     match e {
-        QuorumNotMet | SealNetworkMismatch | SealEpochMismatch | SealBeforeEpochStart => {
-            "unauthenticated".into()
-        }
+        // a seal whose epoch the one-entry history does not hold is `UnknownTrustEpoch` (above it)
+        // or `SealBeforeEpochStart` (below it); both are the reference's "unauthenticated"
+        QuorumNotMet
+        | SealNetworkMismatch
+        | SealEpochMismatch
+        | SealBeforeEpochStart
+        | UnknownTrustEpoch { .. } => "unauthenticated".into(),
         SealMalformed => "invalid_input".into(),
         other => format!("unmapped seal failure {other:?}"),
     }

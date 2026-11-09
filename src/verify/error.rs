@@ -3,8 +3,6 @@
 use alloc::boxed::Box;
 use core::fmt;
 
-use crate::Error;
-
 /// Why a token (or one of its transactions) failed verification.
 ///
 /// Distinct variants make it possible to test that each rule rejects the
@@ -12,8 +10,6 @@ use crate::Error;
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum VerificationError {
-    /// The supplied root trust base is structurally unsafe.
-    InvalidTrustBase(Error),
     /// The genesis network id does not match the trust base.
     NetworkMismatch,
     /// The genesis lock script is not the deterministic minter key for the token id.
@@ -80,9 +76,6 @@ pub enum VerificationError {
     ShardMismatch,
     /// The unicity seal's network id does not match the trust base.
     SealNetworkMismatch,
-    /// The authority uses a configuration this verifier can not judge (stake
-    /// weights other than one); not a statement about any signature.
-    UnsupportedAuthority,
     /// The unicity seal's epoch is not the epoch of the authority's trust base (or, for a
     /// seal checked against a history, the seal's round lies beyond the end of its epoch).
     SealEpochMismatch,
@@ -133,7 +126,6 @@ pub enum VerificationError {
 impl fmt::Display for VerificationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            VerificationError::InvalidTrustBase(e) => write!(f, "{e}"),
             VerificationError::NetworkMismatch => write!(f, "network id does not match trust base"),
             VerificationError::InvalidMintLockScript => {
                 write!(
@@ -240,9 +232,6 @@ impl fmt::Display for VerificationError {
             VerificationError::ShardMismatch => write!(f, "shard does not contain state id"),
             VerificationError::SealNetworkMismatch => {
                 write!(f, "unicity seal network does not match trust base")
-            }
-            VerificationError::UnsupportedAuthority => {
-                write!(f, "unsupported authority configuration (non-unit stake)")
             }
             VerificationError::SealEpochMismatch => {
                 write!(f, "unicity seal epoch does not match trust base")

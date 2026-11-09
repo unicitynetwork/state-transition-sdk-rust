@@ -1,5 +1,5 @@
 //! The verification engine: establishes an unbroken chain of cryptographic
-//! checks from the [`RootTrustBase`] down to every state in a token's history.
+//! checks from the [`TrustBaseHistory`] down to every state in a token's history.
 //!
 //! ## Threat model
 //!
@@ -26,7 +26,7 @@
 //!   threshold and unique validator ids/keys. Only distinct root-node signing
 //!   identities count toward the threshold.
 //!
-//! [`RootTrustBase`]: crate::api::bft::RootTrustBase
+//! [`TrustBaseHistory`]: crate::api::bft::TrustBaseHistory
 //! [`Token::from_cbor`]: crate::transaction::Token::from_cbor
 
 mod context;
@@ -117,11 +117,7 @@ pub(crate) fn verify_token_with_memo_capacity(
 ) -> (Result<(), VerificationError>, SealStats) {
     let mut context =
         VerificationContext::with_memo_capacity(trust_base, registry, policy, capacity);
-    let result = trust_base
-        .authority()
-        .validate()
-        .map_err(VerificationError::InvalidTrustBase)
-        .and_then(|()| verify_token_in_context(token, &mut context));
+    let result = verify_token_in_context(token, &mut context);
     (result, context.seals().stats())
 }
 
@@ -134,12 +130,8 @@ pub(crate) fn verify_token_in_session<'a>(
     registry: &'a MintJustificationRegistry,
     policy: VerificationPolicy,
 ) -> (Result<(), VerificationError>, SealSession<'a>) {
-    let authority = session.authority();
     let mut context = VerificationContext::with_session(session, registry, policy);
-    let result = authority
-        .validate()
-        .map_err(VerificationError::InvalidTrustBase)
-        .and_then(|()| verify_token_in_context(token, &mut context));
+    let result = verify_token_in_context(token, &mut context);
     (result, context.into_session())
 }
 
@@ -310,7 +302,6 @@ pub fn verify_membership_under(
     reference_time: u64,
     policy: &[u8; 32],
 ) -> Result<(), VerificationError> {
-    seals.ensure_trust_base()?;
     let inclusion_certificate = &proof.inclusion_certificate;
     let certification_data = &proof.certification_data;
 
@@ -423,12 +414,12 @@ fn verify_unicity_certificate(
 /// metadata for this check.**
 ///
 /// ```no_run
-/// # use unicity_token::api::{bft::RootTrustBase, NonInclusionProof};
+/// # use unicity_token::api::{bft::TrustBaseHistory, NonInclusionProof};
 /// # use unicity_token::verify::{NonInclusionContext, NonInclusionOutcome};
 /// # struct Checkpoint { network_id: u16, required_root_round: u64 }
 /// # fn policy(
 /// #     proof: &NonInclusionProof,
-/// #     trust_base: &RootTrustBase,
+/// #     trust_base: &TrustBaseHistory,
 /// #     checkpoint: &Checkpoint, // obtained independently of the proof and of the server response
 /// # ) -> Result<(), &'static str> {
 /// let outcome = proof
@@ -470,8 +461,6 @@ pub fn verify_non_inclusion_in(
     target: &StateId,
     context: &NonInclusionContext,
 ) -> Result<NonInclusionOutcome, VerificationError> {
-    seals.ensure_trust_base()?;
-
     // A client-bound proof keeps its request context on every entry point (free functions,
     // warm or cold session): a different target is rejected before any result. An unbound,
     // directly decoded proof takes the explicit target.
@@ -634,11 +623,13 @@ fn verify_predicate(
 #[cfg(all(test, feature = "client"))]
 mod tests {
     use super::*;
-    use crate::api::bft::RootTrustBase;
+    use crate::api::bft::TrustBaseHistory;
+    use crate::crypto::signature::PublicKey;
+    use crate::test_support::{chain_of, history_of};
 
     /// Verify with a fresh seal session per call (the pre-session behavior).
     fn verify_inclusion_proof(
-        trust_base: &RootTrustBase,
+        trust_base: &TrustBaseHistory,
         proof: &InclusionProof,
         transaction: &impl Transaction,
         reference_time: u64,
@@ -653,7 +644,7 @@ mod tests {
 
     /// The outcome of a default-context verification (no optional pins).
     fn ni_at(
-        tb: &RootTrustBase,
+        tb: &TrustBaseHistory,
         proof: &NonInclusionProof,
         target: &StateId,
     ) -> Result<NonInclusionOutcome, VerificationError> {
@@ -663,7 +654,7 @@ mod tests {
     /// `Ok(())` only for absence at an authenticated snapshot; an inclusion is a test failure
     /// here (inclusion has its own tests).
     fn ni_absent_in(
-        tb: &RootTrustBase,
+        tb: &TrustBaseHistory,
         proof: &NonInclusionProof,
         target: &StateId,
         context: &NonInclusionContext,
@@ -675,7 +666,7 @@ mod tests {
     }
 
     fn ni_absent(
-        tb: &RootTrustBase,
+        tb: &TrustBaseHistory,
         proof: &NonInclusionProof,
         target: &StateId,
     ) -> Result<(), VerificationError> {
@@ -690,8 +681,8 @@ mod tests {
     use alloc::string::{String, ToString};
 
     use crate::api::bft::{
-        InputRecord, RootTrustBaseNodeInfo, ShardId, ShardTreeCertificate, UnicityCertificate,
-        UnicitySeal, UnicityTreeCertificate,
+        InputRecord, ShardId, ShardTreeCertificate, UnicityCertificate, UnicitySeal,
+        UnicityTreeCertificate,
     };
     use crate::api::{CertificationData, InclusionCertificate, NetworkId, NonInclusionCertificate};
     use crate::cbor::{encode_byte_string, Decoder};
@@ -708,23 +699,13 @@ mod tests {
         Secp256k1Signer::from_bytes(&[byte; 32]).unwrap()
     }
 
-    fn node_info(s: &Secp256k1Signer, id: &str) -> RootTrustBaseNodeInfo {
-        RootTrustBaseNodeInfo {
-            node_id: id.to_string(),
-            signing_key: s.public_key(),
-            stake: 1,
-        }
+    fn node_info(s: &Secp256k1Signer, id: &str) -> (String, PublicKey, u64) {
+        (id.to_string(), s.public_key(), 1)
     }
 
-    fn trust_base(node: &Secp256k1Signer) -> RootTrustBase {
-        RootTrustBase::new(
-            0,
-            NetworkId::LOCAL,
-            0,
-            0,
-            alloc::vec![node_info(node, "NODE")],
-            1,
-        )
+    /// The one-entry history of epoch 1 (from round 1) whose only member is `node`.
+    fn trust_base(node: &Secp256k1Signer) -> TrustBaseHistory {
+        history_of(NetworkId::LOCAL, 1, 1, alloc::vec![node_info(node, "NODE")])
     }
 
     fn empty_shard() -> ShardId {
@@ -735,7 +716,7 @@ mod tests {
         UnicitySeal {
             network_id: NetworkId::LOCAL,
             root_chain_round_number: 1,
-            epoch: 0,
+            epoch: 1,
             timestamp: REFERENCE_TIME,
             previous_hash: None,
             hash,
@@ -861,7 +842,7 @@ mod tests {
 
     /// A valid `(trust_base, node, owner, transfer, proof)` baseline.
     fn transfer_case() -> (
-        RootTrustBase,
+        TrustBaseHistory,
         Secp256k1Signer,
         Secp256k1Signer,
         TransferTransaction,
@@ -1006,7 +987,7 @@ mod tests {
         assert_eq!(snapshot.shard_id().length(), 0);
         assert_eq!(snapshot.root_round(), 1);
         assert_eq!(snapshot.seal_timestamp_seconds(), REFERENCE_TIME);
-        assert_eq!(snapshot.root_epoch(), 0);
+        assert_eq!(snapshot.root_epoch(), 1);
         assert_eq!(snapshot.shard_round(), 0);
         assert_eq!(snapshot.shard_epoch(), 0);
         assert!(snapshot.state_root().is_some());
@@ -1582,7 +1563,7 @@ mod tests {
     fn genesis_token(
         node: &Secp256k1Signer,
         justification: Option<Vec<u8>>,
-    ) -> (RootTrustBase, MintTransaction, InclusionProof) {
+    ) -> (TrustBaseHistory, MintTransaction, InclusionProof) {
         let recipient = signer(0x55);
         let mint = MintTransaction::create(
             NetworkId::LOCAL,
@@ -1613,13 +1594,11 @@ mod tests {
         let (_, mint, proof) = genesis_token(&node, None);
         let token = Token::new(CertifiedMintTransaction::new(mint, proof), Vec::new());
         // Mint is on LOCAL; verify against a (valid) MAINNET trust base.
-        let mainnet = RootTrustBase::new(
-            0,
+        let mainnet = history_of(
             NetworkId::MAINNET,
-            0,
-            0,
-            alloc::vec![node_info(&node, "NODE")],
             1,
+            1,
+            alloc::vec![node_info(&node, "NODE")],
         );
         assert_eq!(
             token.verify(&mainnet),
@@ -1659,57 +1638,6 @@ mod tests {
             token.verify(&tb),
             Err(VerificationError::UnsupportedMintJustification)
         );
-    }
-
-    // --- trust base rule ---------------------------------------------------
-
-    #[test]
-    fn rule_invalid_trust_base() {
-        let node = signer(0x11);
-        let (_, mint, proof) = genesis_token(&node, None);
-        let token = Token::new(CertifiedMintTransaction::new(mint, proof), Vec::new());
-
-        // Threshold of zero would accept an unsigned seal.
-        let zero_threshold = RootTrustBase::new(
-            0,
-            NetworkId::LOCAL,
-            0,
-            0,
-            alloc::vec![node_info(&node, "NODE")],
-            0,
-        );
-        assert!(matches!(
-            token.verify(&zero_threshold),
-            Err(VerificationError::InvalidTrustBase(_))
-        ));
-
-        // Threshold exceeding the validator count is unattainable.
-        let unattainable = RootTrustBase::new(
-            0,
-            NetworkId::LOCAL,
-            0,
-            0,
-            alloc::vec![node_info(&node, "NODE")],
-            2,
-        );
-        assert!(matches!(
-            token.verify(&unattainable),
-            Err(VerificationError::InvalidTrustBase(_))
-        ));
-
-        // Duplicate signing keys would let one signer satisfy the quorum twice.
-        let duplicate = RootTrustBase::new(
-            0,
-            NetworkId::LOCAL,
-            0,
-            0,
-            alloc::vec![node_info(&node, "NODE-A"), node_info(&node, "NODE-B")],
-            2,
-        );
-        assert!(matches!(
-            token.verify(&duplicate),
-            Err(VerificationError::InvalidTrustBase(_))
-        ));
     }
 
     // --- error wrapping ----------------------------------------------------
@@ -1833,12 +1761,15 @@ mod tests {
         NonInclusionProof::new(base.certificate().clone(), uc)
     }
 
-    fn verify_ni(tb: &RootTrustBase, proof: &NonInclusionProof) -> Result<(), VerificationError> {
+    fn verify_ni(
+        tb: &TrustBaseHistory,
+        proof: &NonInclusionProof,
+    ) -> Result<(), VerificationError> {
         ni_absent(tb, proof, &state_id([0x44; 32]))
     }
 
     fn verify_ni_ctx(
-        tb: &RootTrustBase,
+        tb: &TrustBaseHistory,
         proof: &NonInclusionProof,
         ctx: &NonInclusionContext,
     ) -> Result<(), VerificationError> {
@@ -1921,19 +1852,39 @@ mod tests {
     #[test]
     fn non_inclusion_enforces_the_exact_epoch_with_reused_keys() {
         let node = signer(0x11);
-        // the proof is sealed in epoch 3; the validators' keys are the same in epoch 1
-        let proof = ni_proof(&node, |uc| resign(uc, &node, |s| s.epoch = 3));
-        let mut tb = trust_base(&node);
-        tb.epoch = 3;
+        // the proof is sealed in epoch 3, round 25; the validators' keys are the same in every epoch
+        let proof = ni_proof(&node, |uc| {
+            resign(uc, &node, |s| {
+                s.epoch = 3;
+                s.root_chain_round_number = 25;
+            })
+        });
+        // epochs 1..=4 begin at rounds 1, 10, 20, 30: round 25 lies in epoch 3
+        let tb = chain_of(NetworkId::LOCAL, "NODE", &node, &[1, 10, 20, 30]);
         assert_eq!(verify_ni(&tb, &proof), Ok(()));
-        for other in [0u64, 1, 2, 4] {
-            tb.epoch = other;
-            assert_eq!(
-                verify_ni(&tb, &proof),
-                Err(VerificationError::SealEpochMismatch),
-                "authority of epoch {other}"
-            );
-        }
+        // the entry of epoch 3 is not held yet: retryable, nothing is said about the signatures
+        let short = chain_of(NetworkId::LOCAL, "NODE", &node, &[1, 10]);
+        assert_eq!(
+            verify_ni(&short, &proof),
+            Err(VerificationError::UnknownTrustEpoch { epoch: 3 })
+        );
+        // a history that begins after the seal's epoch can never supply it
+        let later = history_of(
+            NetworkId::LOCAL,
+            4,
+            30,
+            alloc::vec![node_info(&node, "NODE")],
+        );
+        assert_eq!(
+            verify_ni(&later, &proof),
+            Err(VerificationError::SealBeforeEpochStart)
+        );
+        // the next epoch began at or before the seal's round: the seal is past the end of its epoch
+        let ended = chain_of(NetworkId::LOCAL, "NODE", &node, &[1, 10, 20, 25]);
+        assert_eq!(
+            verify_ni(&ended, &proof),
+            Err(VerificationError::SealEpochMismatch)
+        );
     }
 
     #[test]
@@ -1942,14 +1893,23 @@ mod tests {
         let proof = ni_proof(&node, |uc| {
             resign(uc, &node, |s| s.root_chain_round_number = 9)
         });
-        let mut tb = trust_base(&node);
-        tb.epoch_start_round = 9;
+        let tb = history_of(
+            NetworkId::LOCAL,
+            1,
+            9,
+            alloc::vec![node_info(&node, "NODE")],
+        );
         assert_eq!(
             verify_ni(&tb, &proof),
             Ok(()),
             "the start round itself is in the epoch"
         );
-        tb.epoch_start_round = 10;
+        let tb = history_of(
+            NetworkId::LOCAL,
+            1,
+            10,
+            alloc::vec![node_info(&node, "NODE")],
+        );
         assert_eq!(
             verify_ni(&tb, &proof),
             Err(VerificationError::SealBeforeEpochStart)
@@ -2078,7 +2038,7 @@ mod tests {
         assert_eq!(snap.seal_timestamp_seconds(), REFERENCE_TIME + 7);
         assert_eq!(snap.shard_round(), u64::MAX - 1);
         assert_eq!(snap.shard_epoch(), (1 << 53) + 1);
-        assert_eq!(snap.root_epoch(), 0);
+        assert_eq!(snap.root_epoch(), 1);
         assert_eq!(snap.network_id(), NetworkId::LOCAL);
         assert!(snap.state_root().is_some());
     }
@@ -2127,18 +2087,24 @@ mod tests {
     fn non_inclusion_verdicts_are_namespaced_and_witness_bound() {
         let node = signer(0x11);
         let tb = trust_base(&node);
-        let proof = ni_proof(&node, |uc| resign(uc, &node, |s| s.epoch = 4)); // epoch mismatch
-                                                                              // the legacy (inclusion) check of the same certificate in one session passes ...
+        let proof = ni_proof(&node, |_| {});
+        // the legacy (inclusion) check of the certificate in one session passes ...
         let mut session = SealSession::new(&tb);
         assert_eq!(
             verify_unicity_certificate(&mut session, proof.unicity_certificate(), &[0; 32]),
             Ok(())
         );
-        // ... and does not make the strict non-inclusion check pass
+        // ... and does not make a strict non-inclusion check pass whose context the seal violates
+        // (the seal is at the authority's end round)
         let target = state_id([0x44; 32]);
         assert_eq!(
-            verify_non_inclusion_in(&mut session, &proof, &target, &NonInclusionContext::new()),
-            Err(VerificationError::SealEpochMismatch)
+            verify_non_inclusion_in(
+                &mut session,
+                &proof,
+                &target,
+                &NonInclusionContext::new().with_authority_end_round(1)
+            ),
+            Err(VerificationError::SealAfterAuthorityEnd)
         );
 
         // one session, one valid certificate: reused under the same context only
@@ -2174,14 +2140,14 @@ mod tests {
     }
 
     #[test]
-    fn the_legacy_inclusion_verifier_keeps_its_behavior() {
-        // scoping: only non-inclusion became strict; an inclusion proof sealed in
-        // another epoch still verifies under the network-only rule
+    fn an_inclusion_proof_sealed_in_an_epoch_the_history_lacks_is_the_retryable_error() {
+        // inclusion is judged like non-inclusion: by the history entry of the seal's own epoch, so an
+        // epoch that is not held yet is the typed retryable error, not a verdict on the signatures
         let (tb, node, _o, transfer, mut proof) = transfer_case();
         resign(&mut proof.unicity_certificate, &node, |s| s.epoch = 9);
         assert_eq!(
             verify_inclusion_proof(&tb, &proof, &transfer, REFERENCE_TIME),
-            Ok(())
+            Err(VerificationError::UnknownTrustEpoch { epoch: 9 })
         );
     }
 

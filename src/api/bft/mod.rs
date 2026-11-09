@@ -3,7 +3,6 @@
 
 pub mod input_record;
 mod release_pins;
-pub mod root_trust_base;
 pub mod shard_id;
 pub mod shard_tree;
 pub mod trust_base_cache;
@@ -19,7 +18,6 @@ pub mod unicity_seal;
 pub mod unicity_tree;
 
 pub use input_record::InputRecord;
-pub use root_trust_base::{RootTrustBase, RootTrustBaseNodeInfo};
 pub use shard_id::ShardId;
 pub use shard_tree::ShardTreeCertificate;
 pub use trust_base_entry::{TrustBaseEntry, TrustBaseError, TrustBaseMember};

@@ -12,8 +12,8 @@
 //! `recover_from_prehash` and no separate ECDSA verification.
 //!
 //! Public output (committed in this order): `ok`, `mode`, the authority identity
-//! ([`SealSession::authority_identity`], a digest of the trust base: version, network, epoch,
-//! epoch start, threshold and every validator) and the SHA-256 of the payload. The trust base
+//! ([`SealSession::authority_identity`], a digest of the trust base history's network, genesis
+//! entry and latest entry; here a one-entry history) and the SHA-256 of the payload. The trust base
 //! and payload are private inputs, so a proof of this program is only meaningful together with
 //! these values: the verifier of the proof must compare the identity with the authority it
 //! trusts and the digest with the token or certificate it is about.
@@ -21,8 +21,9 @@
 sp1_zkvm::entrypoint!(main);
 
 use serde::{Deserialize, Serialize};
-use unicity_token::api::bft::root_trust_base::RootTrustBaseNodeInfo;
-use unicity_token::api::bft::{RootTrustBase, UnicityCertificate};
+use unicity_token::api::bft::{
+    TrustBaseEntry, TrustBaseHistory, TrustBaseMember, UnicityCertificate,
+};
 use unicity_token::api::NetworkId;
 use unicity_token::cbor::Decoder;
 use unicity_token::crypto::hash::sha256;
@@ -33,36 +34,45 @@ use unicity_token::verify::{SealAuthenticator, SealSession};
 #[derive(Serialize, Deserialize)]
 pub struct Input {
     pub mode: u8,
+    /// Unused: the entry record version is fixed by the library. Kept so the host's input
+    /// layout does not change.
     pub version: u64,
     pub network: u16,
     pub epoch: u64,
     pub epoch_start_round: u64,
+    /// Must equal the entry's quorum threshold `floor(2W/3)+1` of the total weight `W`; the
+    /// history derives it and a different value fails the proof.
     pub threshold: u64,
-    /// (node id, 33-byte compressed key, stake)
+    /// (node id, 33-byte compressed key, weight)
     pub nodes: Vec<(String, Vec<u8>, u64)>,
     pub payload: Vec<u8>,
 }
 
 fn main() {
     let input = sp1_zkvm::io::read::<Input>();
-    let nodes = input
+    let members = input
         .nodes
         .iter()
-        .map(|(id, key, stake)| RootTrustBaseNodeInfo {
-            node_id: id.clone(),
-            signing_key: PublicKey::from_bytes(key).expect("trust base key"),
-            stake: *stake,
+        .map(|(id, key, weight)| {
+            TrustBaseMember::new(
+                id.clone(),
+                PublicKey::from_bytes(key).expect("trust base key"),
+                *weight,
+            )
         })
         .collect();
-    let trust_base = RootTrustBase::try_new(
-        input.version,
+    let genesis = TrustBaseEntry::genesis(
         NetworkId::new(input.network).expect("network"),
         input.epoch,
         input.epoch_start_round,
-        nodes,
-        input.threshold,
-    )
-    .expect("trust base");
+        members,
+    );
+    assert_eq!(
+        genesis.quorum_threshold, input.threshold,
+        "threshold is not floor(2W/3)+1"
+    );
+    // a one-entry history: this guest trusts exactly the committee it was given
+    let trust_base = TrustBaseHistory::from_genesis(genesis, None).expect("trust base");
 
     let ok = match input.mode {
         0 => Token::from_cbor(&input.payload)

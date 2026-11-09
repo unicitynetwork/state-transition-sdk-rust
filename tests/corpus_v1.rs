@@ -11,8 +11,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use unicity_token::api::bft::root_trust_base::RootTrustBaseNodeInfo;
-use unicity_token::api::bft::{RootTrustBase, ShardId, UnicityCertificate};
+use unicity_token::api::bft::{ShardId, TrustBaseHistory, UnicityCertificate};
 use unicity_token::api::NetworkId;
 use unicity_token::cbor::Decoder;
 use unicity_token::consolidation::{
@@ -20,6 +19,9 @@ use unicity_token::consolidation::{
 };
 use unicity_token::crypto::signature::PublicKey;
 use unicity_token::verify::{SealSession, VerificationError};
+
+mod common;
+use common::history_of;
 
 fn assemble(
     view: &PartitionView,
@@ -80,8 +82,8 @@ fn file_name(bits: &str) -> String {
 }
 
 /// `trust-base.cbor`: tag 39000 `[version, network, epoch, epochStart,
-/// [[nodeId, sigKey, stake]...], threshold, ...]`.
-fn trust_base(path: &str) -> RootTrustBase {
+/// [[nodeId, sigKey, weight]...], threshold, ...]`.
+fn trust_base(path: &str) -> TrustBaseHistory {
     let bytes = read(path);
     let items = Decoder::new(&bytes)
         .expect_tag(39000)
@@ -94,22 +96,26 @@ fn trust_base(path: &str) -> RootTrustBase {
         .into_iter()
         .map(|n| {
             let f = n.array(Some(3)).unwrap();
-            RootTrustBaseNodeInfo {
-                node_id: f[0].text().unwrap().into(),
-                signing_key: PublicKey::from_bytes(f[1].bytes_value().unwrap()).unwrap(),
-                stake: f[2].uint().unwrap(),
-            }
+            (
+                f[0].text().unwrap().to_string(),
+                PublicKey::from_bytes(f[1].bytes_value().unwrap()).unwrap(),
+                f[2].uint().unwrap(),
+            )
         })
-        .collect();
-    RootTrustBase::try_new(
-        items[0].uint().unwrap(),
+        .collect::<Vec<_>>();
+    // the history derives its quorum as floor(2W/3)+1: the fixture must record the same
+    let total: u64 = nodes.iter().map(|n| n.2).sum();
+    assert_eq!(
+        items[5].uint().unwrap(),
+        total * 2 / 3 + 1,
+        "fixture quorum threshold is not representable"
+    );
+    history_of(
         NetworkId::new(items[1].uint().unwrap() as u16).unwrap(),
         items[2].uint().unwrap(),
         items[3].uint().unwrap(),
         nodes,
-        items[5].uint().unwrap(),
     )
-    .unwrap()
 }
 
 struct Case {
@@ -269,7 +275,8 @@ fn other_authorities_do_not_authenticate_the_master_seal() {
         ),
         (
             "trust-base-other-epoch",
-            VerificationError::SealEpochMismatch,
+            // the history holds only the fixture's (later) epoch, so the seal's epoch lies below its genesis
+            VerificationError::SealBeforeEpochStart,
         ),
         (
             "trust-base-other-network",

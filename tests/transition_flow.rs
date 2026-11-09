@@ -15,14 +15,16 @@
 //! wire version with the same element count, so one vector covers the encoding
 //! with and without a value in that slot.
 
-use unicity_token::api::bft::root_trust_base::RootTrustBaseNodeInfo;
-use unicity_token::api::bft::RootTrustBase;
+use unicity_token::api::bft::TrustBaseHistory;
 use unicity_token::api::{CertificationData, InclusionProofResponse, NetworkId};
 use unicity_token::cbor::Decoder;
 use unicity_token::crypto::hash::sha256;
 use unicity_token::crypto::signature::PublicKey;
 use unicity_token::transaction::{CertifiedTransferTransaction, Token, Transaction};
 use unicity_token::verify::VerificationError;
+
+mod common;
+use common::history_of;
 
 const FIXTURE: &str = include_str!("vectors/transition_flow.json");
 
@@ -40,27 +42,119 @@ fn alloc_format(key: &str) -> String {
     format!("\"{key}\"")
 }
 
-fn trust_base() -> RootTrustBase {
+fn trust_base() -> TrustBaseHistory {
     let pk = PublicKey::from_bytes(&hex::decode(field(FIXTURE, "aggregatorPublicKey")).unwrap())
         .unwrap();
-    RootTrustBase::new(
-        0,
-        NetworkId::LOCAL,
-        0,
-        0,
-        vec![RootTrustBaseNodeInfo {
-            node_id: "NODE".into(),
-            signing_key: pk,
-            stake: 1,
-        }],
-        1,
-    )
+    history_of(NetworkId::LOCAL, 1, 0, vec![("NODE".into(), pk, 1)])
 }
 
+/// The cross-SDK fixtures (`tests/vectors`, shared and unchangeable here) were generated
+/// with seals of epoch 0, which no trust base history can hold (epochs start at 1).
+/// This re-issues every seal of a fixture token as epoch 1, signed by the fixture
+/// aggregator key (the JS generator's private key 9, checked against the fixture's public
+/// key). Nothing else changes: a seal's hash covers the unicity tree root and not the
+/// epoch, so every proof, path and certificate stays valid, and the epoch and the
+/// 65-byte signature keep their encoded length, so the splice is a same-length
+/// replacement.
+#[cfg(feature = "client")]
+fn reissue_seals_as_epoch_1(json: &str, bytes: &[u8]) -> Vec<u8> {
+    use unicity_token::crypto::signer::{Secp256k1Signer, Signer};
+    let mut secret = [0u8; 32];
+    secret[31] = 9;
+    let signer = Secp256k1Signer::from_bytes(&secret).unwrap();
+    assert_eq!(
+        hex::encode(signer.public_key().as_bytes()),
+        field(json, "aggregatorPublicKey"),
+        "fixture aggregator key"
+    );
+    let token = Token::from_cbor(bytes).expect("decode token");
+    let mut seals = vec![token
+        .genesis()
+        .inclusion_proof()
+        .unicity_certificate
+        .unicity_seal
+        .clone()];
+    seals.extend(
+        token
+            .transactions()
+            .iter()
+            .map(|t| t.inclusion_proof().unicity_certificate.unicity_seal.clone()),
+    );
+    let mut out = bytes.to_vec();
+    for old in seals {
+        assert_eq!(old.epoch, 0, "fixture seals are epoch 0");
+        let mut new = old.clone();
+        new.epoch = 1;
+        let signature = signer.sign(&new.calculate_hash()).encode().to_vec();
+        for (_, sig) in new.signatures.iter_mut() {
+            assert_eq!(sig.len(), signature.len());
+            *sig = signature.clone();
+        }
+        let (old, new) = (old.to_cbor(), new.to_cbor());
+        assert_eq!(old.len(), new.len());
+        let mut at = 0;
+        while let Some(i) = common::find_subslice(&out[at..], &old) {
+            out[at + i..at + i + new.len()].copy_from_slice(&new);
+            at += i + new.len();
+        }
+    }
+    out
+}
+
+/// The re-issued tokens, `{fixture: {token name: hex}}`: stored, so that the verification core (no `client` feature, no signing) runs the
+/// same tests; `epoch_1_fixtures_are_current` regenerates them with [`reissue_seals_as_epoch_1`] and compares (`EPOCH1_UPDATE=1` rewrites
+/// the file).
+const EPOCH_1: &str = include_str!("vectors/transition_flow_epoch1.json");
+const OTHER_FIXTURE: &str = include_str!("vectors/transition_flow_partition0.json");
+#[cfg(feature = "client")]
+const TOKEN_NAMES: [&str; 4] = [
+    "aliceToken",
+    "bobToken",
+    "carolToken",
+    "explicitTimeoutToken",
+];
+
+/// A fixture token, its seals re-issued as epoch 1 (see [`reissue_seals_as_epoch_1`]).
 fn token(name: &str) -> (Vec<u8>, Token) {
-    let bytes = hex::decode(field(FIXTURE, name)).unwrap();
+    token_of("transition_flow", name)
+}
+
+/// `fixture` is `transition_flow` or `transition_flow_partition0`.
+fn token_of(fixture: &str, name: &str) -> (Vec<u8>, Token) {
+    let stored: serde_json::Value = serde_json::from_str(EPOCH_1).unwrap();
+    let hex_str = stored[fixture][name].as_str().expect("stored token");
+    let bytes = hex::decode(hex_str).unwrap();
     let token = Token::from_cbor(&bytes).expect("decode token");
     (bytes, token)
+}
+
+#[cfg(feature = "client")]
+#[test]
+fn epoch_1_fixtures_are_current() {
+    let mut all = serde_json::Map::new();
+    for (fixture, json) in [
+        ("transition_flow", FIXTURE),
+        ("transition_flow_partition0", OTHER_FIXTURE),
+    ] {
+        let mut tokens = serde_json::Map::new();
+        for name in TOKEN_NAMES {
+            let raw = hex::decode(field(json, name)).unwrap();
+            let bytes = reissue_seals_as_epoch_1(json, &raw);
+            tokens.insert(name.into(), serde_json::Value::String(hex::encode(bytes)));
+        }
+        all.insert(fixture.into(), serde_json::Value::Object(tokens));
+    }
+    let fresh = serde_json::Value::Object(all);
+    if std::env::var_os("EPOCH1_UPDATE").is_some() {
+        let text = serde_json::to_string_pretty(&fresh).unwrap() + "\n";
+        std::fs::write("tests/vectors/transition_flow_epoch1.json", text).unwrap();
+        return;
+    }
+    assert_eq!(
+        fresh,
+        serde_json::from_str::<serde_json::Value>(EPOCH_1).unwrap(),
+        "tests/vectors/transition_flow_epoch1.json is stale; EPOCH1_UPDATE=1 cargo test --test transition_flow regenerates it"
+    );
 }
 
 #[test]
@@ -71,7 +165,9 @@ fn decodes_and_roundtrips_byte_for_byte() {
         "carolToken",
         "explicitTimeoutToken",
     ] {
-        let (bytes, token) = token(name);
+        // the unmodified bytes of the reference SDK, not the epoch-1 re-issue
+        let bytes = hex::decode(field(FIXTURE, name)).unwrap();
+        let token = Token::from_cbor(&bytes).expect("decode token");
         assert_eq!(token.to_cbor(), bytes, "{name} did not round-trip");
     }
 }
@@ -123,28 +219,17 @@ fn verifies_against_trust_base() {
 /// and path is valid, only the partition is not the aggregation partition.
 #[test]
 fn rejects_validly_signed_tokens_of_another_partition() {
-    const OTHER: &str = include_str!("vectors/transition_flow_partition0.json");
     let pk =
-        PublicKey::from_bytes(&hex::decode(field(OTHER, "aggregatorPublicKey")).unwrap()).unwrap();
-    let tb = RootTrustBase::new(
-        0,
-        NetworkId::LOCAL,
-        0,
-        0,
-        vec![RootTrustBaseNodeInfo {
-            node_id: "NODE".into(),
-            signing_key: pk,
-            stake: 1,
-        }],
-        1,
-    );
+        PublicKey::from_bytes(&hex::decode(field(OTHER_FIXTURE, "aggregatorPublicKey")).unwrap())
+            .unwrap();
+    let tb = history_of(NetworkId::LOCAL, 1, 0, vec![("NODE".into(), pk, 1)]);
     for name in [
         "aliceToken",
         "bobToken",
         "carolToken",
         "explicitTimeoutToken",
     ] {
-        let token = Token::from_cbor(&hex::decode(field(OTHER, name)).unwrap()).unwrap();
+        let (_, token) = token_of("transition_flow_partition0", name);
         // the wrapper names the failing transaction; the cause is the partition rule
         let err = token.verify(&tb).expect_err(name);
         assert!(
@@ -163,18 +248,7 @@ fn rejects_wrong_aggregator_key() {
         &hex::decode("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798").unwrap(),
     )
     .unwrap();
-    let tb = RootTrustBase::new(
-        0,
-        NetworkId::LOCAL,
-        0,
-        0,
-        vec![RootTrustBaseNodeInfo {
-            node_id: "NODE".into(),
-            signing_key: other,
-            stake: 1,
-        }],
-        1,
-    );
+    let tb = history_of(NetworkId::LOCAL, 1, 0, vec![("NODE".into(), other, 1)]);
     let (_, token) = token("carolToken");
     let err = token.verify(&tb).unwrap_err();
     assert!(
@@ -193,56 +267,9 @@ fn rejects_wrong_network() {
     // Genesis network is LOCAL; a MAINNET trust base must be rejected up front.
     let tb_pk = PublicKey::from_bytes(&hex::decode(field(FIXTURE, "aggregatorPublicKey")).unwrap())
         .unwrap();
-    let tb = RootTrustBase::new(
-        0,
-        NetworkId::MAINNET,
-        0,
-        0,
-        vec![RootTrustBaseNodeInfo {
-            node_id: "NODE".into(),
-            signing_key: tb_pk,
-            stake: 1,
-        }],
-        1,
-    );
+    let tb = history_of(NetworkId::MAINNET, 1, 0, vec![("NODE".into(), tb_pk, 1)]);
     let (_, token) = token("aliceToken");
     assert_eq!(token.verify(&tb), Err(VerificationError::NetworkMismatch));
-}
-
-#[test]
-fn rejects_structurally_unsafe_trust_bases() {
-    let (_, token) = token("aliceToken");
-    let empty = RootTrustBase::new(1, NetworkId::LOCAL, 1, 1, vec![], 0);
-    assert!(matches!(
-        token.verify(&empty),
-        Err(VerificationError::InvalidTrustBase(_))
-    ));
-
-    let key = PublicKey::from_bytes(&hex::decode(field(FIXTURE, "aggregatorPublicKey")).unwrap())
-        .unwrap();
-    let duplicate_key = RootTrustBase::new(
-        1,
-        NetworkId::LOCAL,
-        1,
-        1,
-        vec![
-            RootTrustBaseNodeInfo {
-                node_id: "A".into(),
-                signing_key: key.clone(),
-                stake: 1,
-            },
-            RootTrustBaseNodeInfo {
-                node_id: "B".into(),
-                signing_key: key,
-                stake: 1,
-            },
-        ],
-        2,
-    );
-    assert!(matches!(
-        token.verify(&duplicate_key),
-        Err(VerificationError::InvalidTrustBase(_))
-    ));
 }
 
 #[test]

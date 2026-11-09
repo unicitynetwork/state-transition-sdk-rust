@@ -38,7 +38,7 @@ pub use consolidate::{SystemClock, ThreadedExecutor};
 use alloc::vec::Vec;
 use core::fmt;
 
-use crate::api::bft::RootTrustBase;
+use crate::api::bft::TrustBaseHistory;
 use crate::api::inclusion_proof::InclusionProof;
 use crate::api::{CertificationData, NetworkId, NonInclusionProof, StateId};
 use crate::crypto::signer::Signer;
@@ -169,7 +169,7 @@ pub fn certification_data_for(
 #[allow(clippy::too_many_arguments)]
 pub fn mint<A: AggregatorClient>(
     aggregator: &A,
-    trust_base: &RootTrustBase,
+    trust_base: &TrustBaseHistory,
     network: NetworkId,
     recipient: &impl Predicate,
     token_type: TokenType,
@@ -178,10 +178,7 @@ pub fn mint<A: AggregatorClient>(
     justification: Option<Vec<u8>>,
     expires_at: Option<u64>,
 ) -> Result<Token, ClientError<A::Error>> {
-    trust_base
-        .validate()
-        .map_err(VerificationError::InvalidTrustBase)?;
-    if network != trust_base.network_id {
+    if network != trust_base.network_id() {
         return Err(VerificationError::NetworkMismatch.into());
     }
     let transaction = MintTransaction::create(
@@ -218,7 +215,7 @@ pub fn mint<A: AggregatorClient>(
 #[allow(clippy::too_many_arguments)]
 pub fn transfer<A: AggregatorClient>(
     aggregator: &A,
-    trust_base: &RootTrustBase,
+    trust_base: &TrustBaseHistory,
     token: &Token,
     recipient: &impl Predicate,
     signer: &impl Signer,
@@ -302,17 +299,11 @@ mod tests {
             ))
             .unwrap(),
         );
-        let trust_base = RootTrustBase::new(
-            1,
+        let trust_base = crate::test_support::history_of(
             NetworkId::MAINNET,
-            0,
-            0,
-            alloc::vec![crate::api::bft::root_trust_base::RootTrustBaseNodeInfo {
-                node_id: "NODE".into(),
-                signing_key: recipient.public_key().clone(),
-                stake: 1,
-            }],
             1,
+            1,
+            alloc::vec![("NODE".into(), recipient.public_key().clone(), 1)],
         );
 
         // Fetching the proof fails in the mock, so the flow stops there.

@@ -55,7 +55,7 @@ use super::batch::{
     BatchRequest, InclusionProofBatch, RequestOptions, StateRoot, WaitRequest,
     DEFAULT_WAIT_MARGIN_MS, MAX_BATCH_STATE_IDS,
 };
-use crate::api::bft::{RootTrustBase, ShardId};
+use crate::api::bft::{ShardId, TrustBaseHistory};
 use crate::api::inclusion_proof::InclusionProof;
 use crate::api::{StateId, AGGREGATION_PARTITION_ID};
 use crate::consolidation::{
@@ -233,7 +233,7 @@ struct Group {
 pub struct ProofClient<C, K, X> {
     config: ProofClientConfig,
     router: ShardRouter,
-    trust_base: RootTrustBase,
+    trust_base: TrustBaseHistory,
     registry: MintJustificationRegistry,
     policy: VerificationPolicy,
     endpoints: Vec<(ShardId, C)>,
@@ -260,7 +260,7 @@ impl<C: BatchAggregatorClient + Sync> ProofClient<C, SystemClock, ThreadedExecut
     pub fn with_host_defaults(
         config: ProofClientConfig,
         endpoints: Vec<(ShardId, C)>,
-        trust_base: RootTrustBase,
+        trust_base: TrustBaseHistory,
         max_parallel: usize,
     ) -> Result<Self, ConsolidationError> {
         Self::new(
@@ -280,14 +280,11 @@ impl<C: BatchAggregatorClient + Sync, K: Clock, X: WaveExecutor> ProofClient<C, 
     pub fn new(
         config: ProofClientConfig,
         endpoints: Vec<(ShardId, C)>,
-        trust_base: RootTrustBase,
+        trust_base: TrustBaseHistory,
         clock: K,
         executor: X,
     ) -> Result<Self, ConsolidationError> {
         let cfg = |m: &str| ConsolidationError::Configuration(m.to_string());
-        trust_base
-            .validate()
-            .map_err(|_| cfg("invalid trust base"))?;
         let router = ShardRouter::new(&config.topology)
             .map_err(|e| ConsolidationError::Configuration(e.to_string()))?;
         for (i, (shard, _)) in endpoints.iter().enumerate() {
