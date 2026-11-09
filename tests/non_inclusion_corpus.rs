@@ -14,17 +14,14 @@ use std::path::PathBuf;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use unicity_token::api::bft::{ShardId, TrustBaseHistory};
-use unicity_token::api::NetworkId;
 use unicity_token::api::{NonInclusionCertificate, NonInclusionProof, StateId};
 use unicity_token::cbor::{encode_array, encode_byte_string, encode_uint, Decoder};
-use unicity_token::crypto::signature::PublicKey;
 use unicity_token::verify::{
     verify_non_inclusion_in, NonInclusionContext, NonInclusionOutcome, NonInclusionSnapshot,
     SealSession, VerificationError,
 };
 
 mod common;
-use common::history_of;
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/vectors/non-inclusion/v2")
@@ -95,38 +92,9 @@ enum Verdict {
     Rejected(&'static str),
 }
 
-/// The fixture's single-epoch authority JSON (`version`, `networkId`, `epoch`, `epochStartRound`,
-/// `rootNodes[{nodeId, sigKey, weight}]`, `quorumThreshold`), parsed here into a one-entry history.
-/// The fixture's `stake` field is the member's weight.
+/// The context's authority: a trust base v2 bundle (one genesis entry), opened as a history.
 fn trust_base(ctx: &Value) -> TrustBaseHistory {
-    let json: Value =
-        serde_json::from_slice(&read(ctx["trustBaseJson"].as_str().unwrap())).unwrap();
-    let nodes: Vec<(String, PublicKey, u64)> = json["rootNodes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|n| {
-            let key = n["sigKey"].as_str().unwrap();
-            (
-                n["nodeId"].as_str().unwrap().to_string(),
-                PublicKey::from_bytes(&hex::decode(key.trim_start_matches("0x")).unwrap()).unwrap(),
-                n["stake"].as_u64().unwrap(),
-            )
-        })
-        .collect();
-    // the history derives its quorum as floor(2W/3)+1: the fixture must record the same
-    let total: u64 = nodes.iter().map(|n| n.2).sum();
-    assert_eq!(
-        json["quorumThreshold"].as_u64().unwrap(),
-        total * 2 / 3 + 1,
-        "fixture quorum threshold is not representable"
-    );
-    history_of(
-        NetworkId::new(json["networkId"].as_u64().unwrap() as u16).unwrap(),
-        json["epoch"].as_u64().unwrap(),
-        json["epochStartRound"].as_u64().unwrap(),
-        nodes,
-    )
+    TrustBaseHistory::from_bundle(&read(ctx["trustBaseBundle"].as_str().unwrap()), None).unwrap()
 }
 
 fn context_of(ctx: &Value) -> NonInclusionContext {
@@ -292,7 +260,7 @@ fn check(name: &str, got: &Verdict, expected: &Value) {
 fn the_vendored_corpus_is_unchanged() {
     let manifest = json("manifest.json");
     let sums = manifest["sha256"].as_object().unwrap();
-    assert!(sums.len() >= 100);
+    assert_eq!(sums.len(), 96, "files in the corpus manifest");
     assert_eq!(manifest["version"], 2);
     for (path, want) in sums {
         let got = hex::encode(Sha256::digest(read(path)));
