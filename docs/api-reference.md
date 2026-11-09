@@ -60,7 +60,7 @@ Every application verification path requires the authenticated unicity certifica
 1. validates its structure;
 2. rebuilds the shard tree;
 3. follows the enclosing certificate's partition path to the seal hash and matches the enclosing leaf exactly;
-4. authenticates the complete seal under the caller's `RootTrustBase` (network, exact epoch, round at or after the epoch start, quorum).
+4. authenticates the complete seal under the caller's `TrustAnchor` (a session history for epoch-aware verification) (network, exact epoch, round at or after the epoch start, quorum).
 
 Only then does it return an immutable `AuthenticatedView`, the only input accepted by `certificates()`, which yields ordinary unicity certificates for every shard, all carrying the same seal. No peer configuration list is needed, because the seal commits to every leaf's configuration hash. Independently pinned shard configuration hashes (`Some(&PartitionTopology)`) are an optional stricter policy and are part of `AuthenticatedView::identity()`. The authority is never taken from a response.
 
@@ -123,3 +123,78 @@ if snapshot.network_id().id() != checkpoint.network_id
 `NonInclusionProof::for_state` only records which state ID a proof was requested for. It is request bookkeeping, not evidence.
 
 `HttpError::StateIncluded` reports the server's claim that the state is included. The claim is unauthenticated; request an inclusion proof and verify it.
+
+## 6. Trust-base Sessions
+
+The `api::bft` modules provide V2 trust-base entries and an append-only history. Token verification accepts a `TrustAnchor`; pass the history of an open session so each seal is checked against its own epoch's committee and round interval. Opening verifies the release pin and cached history locally; it makes no HTTP request.
+
+### Public and local setup
+
+The following runs inside an application's async function; the SDK does not choose an executor:
+
+```rust
+use unicity_token::api::NetworkId;
+use unicity_token::api::bft::trust_base_cache::{Authority, MemoryStore, Session, SessionOptions};
+
+let (mut session, diagnostics) = Session::open(
+    NetworkId::TESTNET2, // NetworkId::MAINNET for mainnet.
+    Authority::Release,
+    MemoryStore::new(),
+    SessionOptions::default(),
+).await?;
+// Pass session.history()? to Token::verify and other verification APIs.
+```
+
+For a local/private deployment, obtain a complete bundle through authenticated operator configuration, then use:
+
+```rust
+use unicity_token::api::bft::trust_base_cache::PinSpec;
+
+// deployment_bundle: &[u8], authenticated independently of an untrusted server response.
+let pin = PinSpec::from_bundle(deployment_bundle)?;
+let (local, diagnostics) = Session::open(
+    pin.network_id, Authority::local(deployment_bundle)?,
+    MemoryStore::new(), SessionOptions::default(),
+).await?;
+```
+
+`Authority::local` derives the pins from the supplied bundle and uses namespace `local`. It deliberately chooses that deployment as the authority, without public release-lineage checks; never use an arbitrary downloaded bundle this way to authenticate mainnet. For an explicit private namespace/pin use `Authority::Custom { namespace, pin }`; the namespace must be 1–64 bytes, contain no `/`, and differ from `public`. Chain and signature checks still apply.
+
+`RELEASE_PINS` embeds mainnet (1) and testnet2 (4) genesis-to-release-tip bundles with genesis/checkpoint EntryIDs, epochs and bundle SHA-256. `Authority::ReleaseOverride(pin)` must extend the built-in checkpoint. `Session::open_in` with another table is for tests/release tooling. An unknown public network or invalid release pin is fatal, never rescued by a cache. Release assets and `release-pins/manifest.json` are checked against the generated table by `tests/release_pins.rs`.
+
+### Refresh and verification failures
+
+With the `http` feature, `HttpAggregatorClient` implements `trust_base_update::TrustBaseSource`, reading bounded CBOR from `GET /api/v1/trustbases` on the gateway origin. The source is untrusted transport. Given the client from the README:
+
+```rust
+use unicity_token::api::bft::trust_base_update::UpdateOptions;
+let refreshed = session.refresh(&[&aggregator], &UpdateOptions::default()).await?;
+// Inspect refreshed.flush: a successful fetch can still leave a pending cache save.
+```
+
+The HTTP source is blocking even though session storage is async; run it off an async runtime's event-loop thread. `UpdateOptions` controls passes (default 2), backoff (200 ms), page limits and cancellation. The caller supplies `pause` to implement backoff; the default `None` retries immediately. Pagination freezes the first response's end epoch/EntryID, echoes it on later pages, and continues the same cursor across sources. Every accepted entry extends the held history cryptographically. A source saying `NotYetAvailable`, or a zero-entry update, does not authenticate freshness.
+
+`VerificationError::UnknownTrustEpoch` is the typed missing-future-entry failure; a seal before genesis, outside its epoch interval, of another network or with bad signatures is not repaired by fetching a new authority. Plain verification never fetches. `trust_base_update::verify_with_update` offers one update/retry for a mutable history; it has no store. For sessions, refresh on the typed failure and verify again against `session.history()?` before accepting. `refresh` attempts to save even a valid prefix followed by a failed page; `RefreshError::Update` carries both the update error and flush result.
+
+### Store, merge and conflicts
+
+`trust_base_cache::TrustBaseStore` has async `read(key, max_bytes)` and `compare_and_swap(key, expected, bytes)`. Read returns `StoreRead::Absent` or a coherent `Present` snapshot with bytes and revision. Enforce bounds before allocation; CAS must atomically compare and replace across all sharing writers, returning `StoreCas::Written` or `Changed`. Revisions are not authentication. The key is `utb/v1/<network>/<genesis EntryID hex>/<namespace>`; the application chooses user scope, location and refresh policy.
+
+`MemoryStore` is volatile and single-threaded. With `file-cache`, `trust_base_file_store::FileStore::new(directory)` supplies the optional host adapter; the core remains `no_std + alloc`. It uses a lock directory and a synced temporary file with atomic rename. Busy locks fail immediately and are never stolen, including after a crash; the operator must establish that no writer owns a stale lock before removing it.
+
+All cache entries are re-verified from genesis. A compatible longer cache extends the release history; a newer pin extends a shorter cache. Damage/unreadability falls back to embedded history with diagnostics. Oversize or authenticated checkpoint-conflicting caches are not overwritten. `flush().await` re-reads and validates, imports a longer compatible suffix, and saves the whole bundle with at most four CAS attempts. `Flush::Pending` leaves verified memory usable and unsaved progress dirty. A clean flush does not rescan the store; reopen to discover another writer's changes.
+
+`Session::append`/`merge_bundle` never replace a held entry. An authenticated fork after the pinned checkpoint latches the session (`SessionError::Conflict`, then `SessionError::HistoryConflicted`); `history()` stops being usable for verification. Invalid offers do not latch it, and the pin settles discrepancies within its prefix. `conflict()` and `export_bundle()` expose evidence. The latch is process-local: recording/reporting it is the application's responsibility, not a promise of an untrusted cache surviving deletion.
+
+### Codec, history and resource budgets
+
+`TrustBaseEntry::from_cbor`/`to_cbor` handles deterministic tag 39000, version 2. `entry_id()` hashes unsigned bytes, independent of the witness signatures. `TrustBaseHistory::from_bundle(bytes, Some(genesis_id))` authenticates a complete tag-39015 bundle; `parse_bundle` only decodes it and does not authenticate signatures. A complete bundle starts at genesis, has no gaps and no continuation, and ends at its stated tip. `to_bundle()` exports the entire history. `append` checks network, consecutive epoch, previous EntryID, increasing start round and the predecessor's weighted quorum. All supplied entry signatures must be valid known-member 65-byte low-S recoverable signatures; invalid extras reject the entry. This is separate from seal verification rules.
+
+| Resource | Limit |
+| --- | --- |
+| Members / supplied entry signatures | 256 / 256 |
+| Node ID / encoded entry | 128 UTF-8 bytes / 128 KiB |
+| `trust_base_range::PAGE_LIMITS` | 64 entries / 1 MiB |
+| `BundleLimits::default()` | 4,096 entries / 16 MiB / 128 KiB per entry |
+
+`SessionOptions.limits` can change bundle budgets; exceeding them never prunes old epochs. Keep old entries for old tokens. `TrustBaseError`, `HistoryError`, `RangeError`, `CacheError` and `SessionError` distinguish decoding, chain, page, pin/storage and session failures. `RootTrustBase` remains a single-authority API; the repository's existing JSON-based examples do not establish cross-epoch verification.

@@ -16,17 +16,17 @@ Requires Rust 1.81 or later. Add the SDK with its HTTP client to your `Cargo.tom
 
 ```toml
 [dependencies]
-unicity-token = { version = "0.1", features = ["http"] }
+unicity-token = { version = "4.0", features = ["http"] }
 ```
 
 ## Unicity Network
 
 Mainnet is live. Start with testnet2; for production, use the mainnet gateway and matching trust base.
 
-| Network | Gateway | Network ID | Trust base |
-| --- | --- | --- | --- |
-| Mainnet | `https://gateway.mainnet.unicity.network` | `1` | [JSON](https://raw.githubusercontent.com/unicitynetwork/unicity-ids/main/bft-trustbase.mainnet.json) |
-| Testnet2 | `https://gateway.testnet2.unicity.network` | `4` | [JSON](https://raw.githubusercontent.com/unicitynetwork/unicity-ids/main/bft-trustbase.testnet2.json) |
+| Network | Gateway | Network ID |
+| --- | --- | --- |
+| Mainnet | `https://gateway.mainnet.unicity.network` | `1` |
+| Testnet2 | `https://gateway.testnet2.unicity.network` | `4` |
 
 Pass your gateway API key through `HttpAggregatorClient::with_api_key`. The public testnet2 key is `sk_ddc3cfcc001e4a28ac3fad7407f99590`. Use your own mainnet key obtained from [Sphere](https://sphere.unicity.network/) and keep it secure.
 
@@ -34,29 +34,22 @@ Every aggregator request carries `X-SDK-Version: rust/<crate version>` so that t
 
 ### Client setup
 
-Download the testnet2 trust base above as `bft-trustbase.testnet2.json` in your working directory. Configure the client and load the trust base:
+Configure the client below. Verification needs a trust-base history pinned to a known genesis; open it through a session using the [mainnet, testnet2 or local setup](./docs/api-reference.md#6-trust-base-sessions).
 
 ```rust
 use std::time::Duration;
-use unicity_token::api::bft::RootTrustBase;
 use unicity_token::client::HttpAggregatorClient;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let trust_base = RootTrustBase::from_json(
-        &std::fs::read_to_string("bft-trustbase.testnet2.json")?,
-    )?;
-    let _aggregator = HttpAggregatorClient::new(
+    let aggregator = HttpAggregatorClient::new(
         "https://gateway.testnet2.unicity.network",
     )
     .with_api_key("sk_ddc3cfcc001e4a28ac3fad7407f99590") // Public testnet2 key
     .with_polling(Duration::from_secs(2), 90);
 
-    println!("Network ID: {}", trust_base.network_id.id());
     Ok(())
 }
 ```
-
-The trust base identifies the Consensus Layer (BFT Core) instance. Pin a trusted copy in your application for production. Use `trust_base.network_id` when creating tokens so they match your gateway; testnet2 is network ID `4` (`NetworkId::TESTNET2`).
 
 `HttpAggregatorClient` provides a blocking HTTP transport. Applications can implement the `AggregatorClient` trait to supply their own transport.
 
@@ -82,9 +75,9 @@ Serialize with `token.to_cbor()` to save or send a token, and deserialize with `
 ```rust
 use unicity_token::Token;
 
-// `token_bytes` comes from your storage or transport.
+// `token_bytes` comes from your storage or transport; `session` is opened as in the API reference.
 let token = Token::from_cbor(&token_bytes)?;
-token.verify(&trust_base)?;
+token.verify(session.history()?)?;
 ```
 
 `Token::verify` checks cryptographic history; application data remains opaque. Use `Token::verify_with` for registered mint justifications and `payment::verify_payment_token` for payments.
@@ -108,7 +101,7 @@ cargo run --example transfer --features http
 cargo run --example split --features http
 ```
 
-The examples default to testnet2 with its bundled trust base. Configure `UNICITY_GATEWAY`, `UNICITY_API_KEY`, and `UNICITY_TRUSTBASE` through your environment or `e2e/.env`; relative trust-base paths resolve under `e2e/`. Example keys are discarded on exit. See [example configuration](./examples/README.md).
+These examples still use a single-epoch JSON trust base and default to testnet2; use the session history above when adapting them for epoch changes. Configure `UNICITY_GATEWAY`, `UNICITY_API_KEY`, and `UNICITY_TRUSTBASE` through your environment or `e2e/.env`; relative trust-base paths resolve under `e2e/`. Example keys are discarded on exit. See [example configuration](./examples/README.md).
 
 ## Security
 
@@ -123,16 +116,17 @@ Verify tokens against the correct trust base and configure accepted issuers thro
 | `alloc` | Via `std` and `client` | Allocated structures used by the verification core. |
 | `std` | Yes | Standard library integration, key generation, and JSON trust-base parsing. |
 | `client` | Yes | Transaction construction, signing, minting, transfers, and split construction. |
+| `file-cache` | No | Optional host filesystem store for trust-base sessions. |
 | `http` | No | Blocking HTTP client for host applications. Enables `std` and `client`. |
 
 For verification in a `no_std` environment, including WASM and zkVM guests:
 
 ```toml
 [dependencies]
-unicity-token = { version = "0.1", default-features = false, features = ["alloc"] }
+unicity-token = { version = "4.0", default-features = false, features = ["alloc"] }
 ```
 
-Token and payment verification remain available in this configuration. Construct the trust base with `RootTrustBase::try_new`; JSON parsing requires `std`.
+Token and payment verification remain available in this configuration. Use a pinned `TrustBaseHistory` for epoch-aware verification; see the API reference. `RootTrustBase::try_new` remains available for a single authority.
 
 ## Development
 
