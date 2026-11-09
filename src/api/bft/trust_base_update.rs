@@ -223,6 +223,9 @@ pub fn update(
     // entry is refused. (The history cannot move on by other means while this holds it mutably, so unlike JS there is no re-sync here.)
     let mut from = next_from(history);
     let mut snapshot: Option<Snapshot> = None;
+    // The highest end any source announced in this call. Unlike the snapshot it survives the drop after a HistoryMismatch/NotYetAvailable
+    // refusal, so a source that only knows an older tip is not "current" while a higher end was announced and not yet reached.
+    let mut announced_end: u64 = 0;
 
     for round in 0..options.rounds {
         if round > 0 {
@@ -272,7 +275,15 @@ pub fn update(
                     && snapshot.is_none()
                     && page.effective_end < from
                 {
-                    current += 1;
+                    if announced_end < from {
+                        current += 1;
+                    } else {
+                        // a higher end was announced and the held tip has not reached it: transient (not current, not final)
+                        causes.push(UpdateCause::Status {
+                            source: index,
+                            status: page.status,
+                        });
+                    }
                     break;
                 }
                 // A source that refuses the echoed snapshot (another history, or an end above its tip) may be the honest one: the snapshot came from whichever source
@@ -329,6 +340,7 @@ pub fn update(
                             });
                             refused = true;
                             snapshot = None;
+                            announced_end = 0;
                             from = next_from(history);
                             break;
                         }
@@ -340,6 +352,7 @@ pub fn update(
                 let Some(next) = page.next_epoch else {
                     return Ok(appended);
                 };
+                announced_end = announced_end.max(page.effective_end);
                 if snapshot.is_none() {
                     snapshot = Some(Snapshot {
                         end: page.effective_end,

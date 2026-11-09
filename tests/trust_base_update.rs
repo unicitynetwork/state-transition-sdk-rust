@@ -431,12 +431,15 @@ fn nothing_newer_means_a_tip_below_the_requested_epoch_and_only_without_a_snapsh
     assert_eq!(update(&mut h, &[src(&s)], &one_round), Ok(0));
 
     // in the middle of a paged range (a snapshot is frozen) the same answer is not "current" by itself: the snapshot is dropped and the
-    // source is asked again from the tip without it; only that answer counts
+    // source is asked again from the tip without it; its lagging answer is still not "current" while the announced end is above the held tip
     let mut h = genesis_only();
     let p1 = page(2, 4, [8; 32], &["epoch2-signed-abc"], Some(3));
     let lag = status_page(3, 3, 2);
     let s = Script::new(move |i, _| Ok(if i == 0 { p1.clone() } else { lag.clone() }));
-    assert_eq!(update(&mut h, &[src(&s)], &one_round), Ok(1));
+    // the announced end 4 is above the held tip: the lagging answer is transient, never "current"; the call fails (retryable) with the prefix kept
+    let e = update(&mut h, &[src(&s)], &one_round).unwrap_err();
+    assert_eq!((e.failure, e.appended), (UpdateFailure::NoneServed, 1));
+    assert_eq!(h.latest().epoch, 2);
     let seen = s.seen.borrow();
     assert_eq!(seen.len(), 3);
     assert!(seen[1].snapshot.is_some() && seen[2].snapshot.is_none());
@@ -477,6 +480,45 @@ fn a_fake_snapshot_end_above_the_honest_tip_does_not_make_the_honest_source_fina
     assert!(n >= 2);
     assert_eq!(h.latest().epoch, 3);
     assert!(honest.seen.borrow().iter().any(|r| r.snapshot.is_none()));
+}
+
+/// A source that only knows an older tip cannot end the call as "current" once another source announced a higher end.
+#[test]
+fn an_older_tip_is_not_current_once_a_higher_end_was_announced() {
+    let mut h = genesis_only();
+    let p1 = page(2, 4, [8; 32], &["epoch2-signed-abc"], Some(3));
+    let a = Script::new(move |i, _| {
+        if i == 0 {
+            Ok(p1.clone())
+        } else {
+            Err(SourceError("gone".into()))
+        }
+    });
+    let older = fixed(status_page(3, 3, 2));
+    let e = update(
+        &mut h,
+        &[src(&a), src(&older)],
+        &UpdateOptions {
+            rounds: 1,
+            ..UpdateOptions::default()
+        },
+    )
+    .unwrap_err();
+    assert_eq!((e.failure, e.appended), (UpdateFailure::NoneServed, 1));
+    // without any announcement the same older source is "current"
+    let mut h2 = genesis_only();
+    let only = fixed(status_page(3, 2, 1));
+    assert_eq!(
+        update(
+            &mut h2,
+            &[src(&only)],
+            &UpdateOptions {
+                rounds: 1,
+                ..UpdateOptions::default()
+            }
+        ),
+        Ok(0)
+    );
 }
 
 #[test]
