@@ -9,11 +9,13 @@ and Java SDKs ship.
 
 `generate-vector.ts` is the generator. It is a Jest test rather than a script
 because the TypeScript SDK's in-memory aggregator (`TestAggregatorClient`) and
-token helpers live under its `tests/` tree.
+token helpers live under its `tests/` tree. It targets the 4.0.0 API (the trust
+base is the history of the test aggregator, `aggregator.rootTrustBase`, whose genesis
+is appended once `aggregator.ready` settles).
 
 ```sh
 cd ../state-transition-sdk-js
-git checkout v3.0.1                     # or whichever release to pin against
+git checkout upstream-pr/utb-v2         # or the 4.0.0 release
 npm ci
 cp ../state-transition-sdk-rust/tests/vectors/generate-vector.ts \
    tests/functional/GenerateRustVectorTest.ts
@@ -30,6 +32,14 @@ value that moves on every run is `explicitTimeout`, which is a wall-clock
 deadline an hour ahead: the in-memory aggregator pins its round reference time to
 the current clock and will not admit a request whose deadline has passed.
 
+## Partition and epoch
+
+Every application fixture certifies the aggregation partition 7 (`AGGREGATION_PARTITION_ID`) in
+epoch 1 of the test aggregator's trust base history, which the Rust tests build as a one-entry
+history of the aggregator key (private key 9). A token of another partition is not a vector: the
+JS SDK refuses to mint one, and the partition check is covered by the unit tests of
+`src/verify/mod.rs`.
+
 ## Why it is generated rather than hand-written
 
 Regenerating against a released TypeScript SDK is what catches a divergence.
@@ -39,15 +49,3 @@ with a three-element certified transaction while the shipped SDKs had moved to
 version 2 and two elements. Every Rust test passed, because the fixture and the
 code had drifted together. Pin the checkout to a tag.
 
-## Partition
-
-Every application fixture certifies partition 7 (`AGGREGATION_PARTITION_ID`). The JS
-generator's fixture helper (`tests/utils/UnicityCertificateFixture.ts`) uses partition 0
-at v3.0.1, so the vector is generated with its `partitionIdentifier` changed to `7n` (a
-edit of the helper; the JS SDK's own change lands with its fixed-partition PR). The same edit makes the
-fixture UC satisfy Go's `UnicityCertificate.IsValid` (32-byte technical record hash, non-empty block
-hash for the changed state hash, seal round 1 with a timestamp): apply
-`jsv3.0.1-valid-uc-fixture.patch` to the v3.0.1 checkout before running the generator.
-`transition_flow_partition0.json` is the previous vector: validly signed by the same key but
-certifying partition 0. It is a negative fixture only: every token in it must be rejected
-with `PartitionMismatch`. Never regenerate it.

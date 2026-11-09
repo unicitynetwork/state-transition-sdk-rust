@@ -24,18 +24,16 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use unicity_token::api::bft::{ShardId, TrustBaseHistory};
-use unicity_token::api::{InclusionProofResponse, NetworkId, StateId};
+use unicity_token::api::{InclusionProofResponse, StateId};
 use unicity_token::cbor::Decoder;
 use unicity_token::client::{
     BatchFailure, BundleOutcome, ConsolidateOptions, ConsolidationError, HttpAggregatorClient,
     IntegrityError, ProofClient, ProofClientConfig, ProofItem, UnavailableReason,
 };
 use unicity_token::consolidation::{PartitionTopology, PartitionViewError};
-use unicity_token::crypto::signature::PublicKey;
 use unicity_token::verify::VerificationError;
 
 mod common;
-use common::history_of;
 
 fn corpus_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/vectors/uc-consolidation/corpus-v1")
@@ -75,37 +73,8 @@ fn shard(bits: &str) -> ShardId {
 }
 
 fn trust_base(bytes: &[u8]) -> TrustBaseHistory {
-    let items = Decoder::new(bytes)
-        .expect_tag(39000)
-        .unwrap()
-        .array(Some(10))
-        .unwrap();
-    let nodes = items[4]
-        .array(None)
-        .unwrap()
-        .into_iter()
-        .map(|n| {
-            let f = n.array(Some(3)).unwrap();
-            (
-                f[0].text().unwrap().to_string(),
-                PublicKey::from_bytes(f[1].bytes_value().unwrap()).unwrap(),
-                f[2].uint().unwrap(),
-            )
-        })
-        .collect::<Vec<_>>();
-    // the history derives its quorum as floor(2W/3)+1: the fixture must record the same
-    let total: u64 = nodes.iter().map(|n| n.2).sum();
-    assert_eq!(
-        items[5].uint().unwrap(),
-        total * 2 / 3 + 1,
-        "fixture quorum threshold is not representable"
-    );
-    history_of(
-        NetworkId::new(items[1].uint().unwrap() as u16).unwrap(),
-        items[2].uint().unwrap(),
-        items[3].uint().unwrap(),
-        nodes,
-    )
+    // the authority: a trust base v2 bundle holding the genesis entry, opened as a history
+    TrustBaseHistory::from_bundle(bytes, None).unwrap()
 }
 
 // ---------------------------------------------------------------- scripted server

@@ -45,9 +45,9 @@ func Test_GenRustVectors(t *testing.T) {
 		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
 		require.NoError(t, os.WriteFile(path, data, 0o644))
 	}
-	tbJSON, err := json.MarshalIndent(tb, "", "  ")
-	require.NoError(t, err)
-
+	// The authority of each directory is trust-base.cbor, a trust base v2 bundle (tag 39015, one genesis entry) of tb's network, epoch, start
+	// round and nodes; it is built from those values by aggregator-go internal/consolidationcorpus AuthorityBundle and not written here (this
+	// generator runs in a bft-go-base commit which has no version-2 trust base).
 	for _, bits := range []int{0, 2, 3} {
 		n := 1 << bits
 		scheme := pvScheme(bits)
@@ -88,7 +88,6 @@ func Test_GenRustVectors(t *testing.T) {
 
 		write(filepath.Join(out, "view.cbor"), viewBytes)
 		write(filepath.Join(out, "enclosing-uc.cbor"), ucBytes)
-		write(filepath.Join(out, "trust-base.json"), tbJSON)
 		type ctx struct {
 			PartitionID   uint32   `json:"partitionId"`
 			ShardIDs      []string `json:"shardIds"` // hex of the end-marker bitstring, canonical order
@@ -159,10 +158,7 @@ func Test_GenRustVectorsWeighted(t *testing.T) {
 		ShardTreeCertificate: stc, UnicityTreeCertificate: utc, UnicitySeal: seal}
 	ucBytes, err := uc.MarshalCBOR()
 	require.NoError(t, err)
-	tbJSON, err := json.MarshalIndent(tb, "", "  ")
-	require.NoError(t, err)
 	out := filepath.Join(dir, "weighted-4")
 	require.NoError(t, os.MkdirAll(out, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(out, "enclosing-uc.cbor"), ucBytes, 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(out, "trust-base.json"), tbJSON, 0o644))
 }

@@ -30,58 +30,6 @@ fn trust_base() -> TrustBaseHistory {
     history_of(NetworkId::LOCAL, 1, 0, vec![("NODE".into(), pk, 1)])
 }
 
-/// The cross-SDK fixtures (`tests/vectors`, shared and unchangeable here) were generated
-/// with seals of epoch 0, which no trust base history can hold (epochs start at 1).
-/// This re-issues every seal of a fixture token as epoch 1, signed by the fixture
-/// aggregator key (the JS generator's private key 9, checked against the fixture's public
-/// key). Nothing else changes: a seal's hash covers the unicity tree root and not the
-/// epoch, so every proof, path and certificate stays valid, and the epoch and the
-/// 65-byte signature keep their encoded length, so the splice is a same-length
-/// replacement.
-fn reissue_seals_as_epoch_1(json: &str, bytes: &[u8]) -> Vec<u8> {
-    use unicity_token::crypto::signer::{Secp256k1Signer, Signer};
-    let mut secret = [0u8; 32];
-    secret[31] = 9;
-    let signer = Secp256k1Signer::from_bytes(&secret).unwrap();
-    assert_eq!(
-        hex::encode(signer.public_key().as_bytes()),
-        field(json, "aggregatorPublicKey"),
-        "fixture aggregator key"
-    );
-    let token = Token::from_cbor(bytes).expect("decode token");
-    let mut seals = vec![token
-        .genesis()
-        .inclusion_proof()
-        .unicity_certificate
-        .unicity_seal
-        .clone()];
-    seals.extend(
-        token
-            .transactions()
-            .iter()
-            .map(|t| t.inclusion_proof().unicity_certificate.unicity_seal.clone()),
-    );
-    let mut out = bytes.to_vec();
-    for old in seals {
-        assert_eq!(old.epoch, 0, "fixture seals are epoch 0");
-        let mut new = old.clone();
-        new.epoch = 1;
-        let signature = signer.sign(&new.calculate_hash()).encode().to_vec();
-        for (_, sig) in new.signatures.iter_mut() {
-            assert_eq!(sig.len(), signature.len());
-            *sig = signature.clone();
-        }
-        let (old, new) = (old.to_cbor(), new.to_cbor());
-        assert_eq!(old.len(), new.len());
-        let mut at = 0;
-        while let Some(i) = find_subslice(&out[at..], &old) {
-            out[at + i..at + i + new.len()].copy_from_slice(&new);
-            at += i + new.len();
-        }
-    }
-    out
-}
-
 fn obj(proof: &str, status: &str, echo: Option<u64>) -> String {
     match echo {
         Some(e) => format!(r#"{{"proof":"{proof}","status":"{status}","waitedMs":{e}}}"#),
@@ -145,7 +93,7 @@ fn do_mint(c: &HttpAggregatorClient) {
 
 fn do_transfer(c: &HttpAggregatorClient) {
     let raw = hex::decode(field(FIXTURE, "aliceToken")).unwrap();
-    let token = Token::from_cbor(&reissue_seals_as_epoch_1(FIXTURE, &raw)).unwrap();
+    let token = Token::from_cbor(&raw).unwrap();
     let bob = Secp256k1Signer::generate().unwrap();
     let alice = Secp256k1Signer::generate().unwrap();
     let err = client::transfer(

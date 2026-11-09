@@ -103,21 +103,22 @@ struct Case {
     tree_root: Vec<u8>,
 }
 
+/// The files of one case: context JSON, authority bundle, view, enclosing UC, derived UCs.
+type CaseFiles = (
+    &'static str,
+    &'static [u8],
+    &'static [u8],
+    &'static [u8],
+    Vec<&'static [u8]>,
+);
+
 fn case(n: usize) -> Case {
-    let (context, tb_json, view_bytes, uc_bytes, expected_ucs): (
-        &str,
-        &str,
-        &[u8],
-        &[u8],
-        Vec<&[u8]>,
-    ) = match n {
+    let (context, tb_bundle, view_bytes, uc_bytes, expected_ucs): CaseFiles = match n {
         1 => (
             include_str!(
                 "vectors/uc-consolidation/partition-view/v1/derived/shards-1/context.json"
             ),
-            include_str!(
-                "vectors/uc-consolidation/partition-view/v1/derived/shards-1/trust-base.json"
-            ),
+            &vector!("derived/shards-1/trust-base.cbor")[..],
             &vector!("derived/shards-1/view.cbor")[..],
             vector!("derived/shards-1/enclosing-uc.cbor"),
             vec![vector!("derived/shards-1/ucs/00.cbor")],
@@ -126,9 +127,7 @@ fn case(n: usize) -> Case {
             include_str!(
                 "vectors/uc-consolidation/partition-view/v1/derived/shards-4/context.json"
             ),
-            include_str!(
-                "vectors/uc-consolidation/partition-view/v1/derived/shards-4/trust-base.json"
-            ),
+            &vector!("derived/shards-4/trust-base.cbor")[..],
             &vector!("derived/shards-4/view.cbor")[..],
             vector!("derived/shards-4/enclosing-uc.cbor"),
             vec![
@@ -142,9 +141,7 @@ fn case(n: usize) -> Case {
             include_str!(
                 "vectors/uc-consolidation/partition-view/v1/derived/shards-8/context.json"
             ),
-            include_str!(
-                "vectors/uc-consolidation/partition-view/v1/derived/shards-8/trust-base.json"
-            ),
+            &vector!("derived/shards-8/trust-base.cbor")[..],
             &vector!("derived/shards-8/view.cbor")[..],
             vector!("derived/shards-8/enclosing-uc.cbor"),
             vec![
@@ -178,27 +175,19 @@ fn case(n: usize) -> Case {
         topology = topology.with_shard_conf_hash(&id, conf);
     }
 
-    let key = PublicKey::from_bytes(
-        &hex::decode(field(tb_json, "sigKey").trim_start_matches("0x")).unwrap(),
-    )
-    .unwrap();
-    // the fixture's `stake` is the member's weight; its quorum threshold is the history's rule
-    assert_eq!(
-        number(tb_json, "quorumThreshold"),
-        number(tb_json, "stake") * 2 / 3 + 1,
-        "fixture quorum threshold is not representable"
-    );
+    // the authority: a trust base v2 bundle (tag 39015) of one genesis entry, opened as a history
+    let trust_base = TrustBaseHistory::from_bundle(tb_bundle, None).unwrap();
+    let entry = trust_base.latest();
     let spec = AuthoritySpec {
-        network: NetworkId::new(number(tb_json, "networkId") as u16).unwrap(),
-        epoch: number(tb_json, "epoch"),
-        epoch_start: number(tb_json, "epochStartRound"),
-        nodes: vec![(
-            field(tb_json, "nodeId").to_string(),
-            key,
-            number(tb_json, "stake"),
-        )],
+        network: entry.network_id,
+        epoch: entry.epoch,
+        epoch_start: entry.epoch_start,
+        nodes: entry
+            .members
+            .iter()
+            .map(|m| (m.node_id.clone(), m.signing_key.clone(), m.weight))
+            .collect(),
     };
-    let trust_base = spec.build();
 
     Case {
         view_bytes,
@@ -849,15 +838,13 @@ fn null_summary_leaves_hash_exactly_and_yield_ordinary_certificates() {
 /// quorum 3) are not satisfied by two signers: a quorum failure, nothing cached.
 #[test]
 fn weighted_authority_counts_weights_not_signers() {
-    let json = include_str!(
-        "vectors/uc-consolidation/partition-view/v1/derived/weighted-4/trust-base.json"
-    );
-    let keys: Vec<PublicKey> = json
-        .match_indices("\"sigKey\": \"")
-        .map(|(i, m)| {
-            let hex = &json[i + m.len()..].trim_start_matches("0x")[..66];
-            PublicKey::from_bytes(&hex::decode(hex).unwrap()).unwrap()
-        })
+    let authority =
+        TrustBaseHistory::from_bundle(vector!("derived/weighted-4/trust-base.cbor"), None).unwrap();
+    let keys: Vec<PublicKey> = authority
+        .latest()
+        .members
+        .iter()
+        .map(|m| m.signing_key.clone())
         .collect();
     assert_eq!(keys.len(), 3);
     let with_weights = |weights: [u64; 3]| {

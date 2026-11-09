@@ -28,6 +28,7 @@ const OUT = process.env.RUST_VECTOR_OUT;
 describe('Generate Rust cross-SDK vector', () => {
   it('mints and transfers Alice -> Bob -> Carol, then writes the vector', async () => {
     const aggregator = TestAggregatorClient.create(key(9));
+    await aggregator.ready; // the genesis of the trust base history is appended
     const client = new StateTransitionClient(aggregator);
     const trustBase = aggregator.rootTrustBase;
 
