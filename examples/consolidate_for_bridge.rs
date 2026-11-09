@@ -17,6 +17,8 @@
 
 #[path = "common/consolidation.rs"]
 mod common;
+#[path = "common/session.rs"]
+mod session;
 
 use unicity_token::client::{CancelToken, ConsolidateOptions, ConsolidationOutcome};
 use unicity_token::transaction::Token;

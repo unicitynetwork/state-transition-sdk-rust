@@ -27,8 +27,13 @@ your key):
 ```
 UNICITY_GATEWAY=https://gateway.testnet2.unicity.network/
 UNICITY_API_KEY=sk_…
-UNICITY_TRUSTBASE=bft-trustbase.testnet2.json
 ```
+
+Verification uses a trust-base session (`examples/common/session.rs`): by default the
+testnet2 release pin embedded in the SDK, extended from the aggregator and verified
+entry by entry. `UNICITY_NETWORK=mainnet` selects mainnet; `UNICITY_LOCAL_BUNDLE=<file>`
+(a complete trust-base bundle of a local deployment, obtained through a channel you
+trust) opens a local session instead.
 
 Values already present in the process environment take precedence. The examples
 require the `http` feature (a blocking TLS HTTP stack); they generate ephemeral

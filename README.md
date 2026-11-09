@@ -101,20 +101,20 @@ cargo run --example transfer --features http
 cargo run --example split --features http
 ```
 
-These examples still use a single-epoch JSON trust base and default to testnet2; use the session history above when adapting them for epoch changes. Configure `UNICITY_GATEWAY`, `UNICITY_API_KEY`, and `UNICITY_TRUSTBASE` through your environment or `e2e/.env`; relative trust-base paths resolve under `e2e/`. Example keys are discarded on exit. See [example configuration](./examples/README.md).
+These examples open a trust-base session (the testnet2 release pin by default), extend it from the aggregator and verify with `session.history()`. Configure `UNICITY_GATEWAY` and `UNICITY_API_KEY` through your environment or `e2e/.env`; set `UNICITY_NETWORK=mainnet` for mainnet or `UNICITY_LOCAL_BUNDLE` to the complete trust-base bundle of a local deployment. Example keys are discarded on exit. See [example configuration](./examples/README.md).
 
 ## Security
 
 Unicity proofs provide independently verifiable evidence of certified state transitions being unique, backed by the network's Byzantine fault tolerant consensus. Together with ownership verification, they protect against double-spending without publishing token contents to a public ledger.
 
-Verify tokens against the correct trust base and configure accepted issuers through `PaymentDataVerifier` and `MintJustificationRegistry`. Cryptographic validity does not authorize an issuer. Keep private keys and token backups secure, and check that received tokens belong to the intended recipient.
+Verify tokens against the correct trust-base history and configure accepted issuers through `PaymentDataVerifier` and `MintJustificationRegistry`. Cryptographic validity does not authorize an issuer. Keep private keys and token backups secure, and check that received tokens belong to the intended recipient.
 
 ## Feature flags
 
 | Feature | Default | Purpose |
 | --- | --- | --- |
 | `alloc` | Via `std` and `client` | Allocated structures used by the verification core. |
-| `std` | Yes | Standard library integration, key generation, and JSON trust-base parsing. |
+| `std` | Yes | Standard library integration and key generation. |
 | `client` | Yes | Transaction construction, signing, minting, transfers, and split construction. |
 | `file-cache` | No | Optional host filesystem store for trust-base sessions. |
 | `http` | No | Blocking HTTP client for host applications. Enables `std` and `client`. |
@@ -126,7 +126,7 @@ For verification in a `no_std` environment, including WASM and zkVM guests:
 unicity-token = { version = "4.0", default-features = false, features = ["alloc"] }
 ```
 
-Token and payment verification remain available in this configuration. Use a pinned `TrustBaseHistory` for epoch-aware verification; see the API reference. `RootTrustBase::try_new` remains available for a single authority.
+Token and payment verification remain available in this configuration. Verification is anchored in a pinned `TrustBaseHistory`; see the API reference.
 
 ## Development
 
@@ -138,7 +138,7 @@ cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-The [live end-to-end test](./tests/e2e.rs) is ignored by default. It reads gateway credentials from `e2e/unicity-service` and uses `e2e/bft-trustbase.testnet2.json`:
+The [live end-to-end test](./tests/e2e.rs) is ignored by default. It reads gateway credentials from `e2e/unicity-service` and verifies with the testnet2 release-pin session, extended from the aggregator:
 
 ```bash
 cargo test --features http --test e2e -- --ignored --nocapture

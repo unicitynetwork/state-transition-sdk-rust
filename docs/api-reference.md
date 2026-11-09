@@ -197,4 +197,4 @@ All cache entries are re-verified from genesis. A compatible longer cache extend
 | `trust_base_range::PAGE_LIMITS` | 64 entries / 1 MiB |
 | `BundleLimits::default()` | 4,096 entries / 16 MiB / 128 KiB per entry |
 
-`SessionOptions.limits` can change bundle budgets; exceeding them never prunes old epochs. Keep old entries for old tokens. `TrustBaseError`, `HistoryError`, `RangeError`, `CacheError` and `SessionError` distinguish decoding, chain, page, pin/storage and session failures. `RootTrustBase` remains a single-authority API; the repository's existing JSON-based examples do not establish cross-epoch verification.
+`SessionOptions.limits` can change bundle budgets; exceeding them never prunes old epochs. Keep old entries for old tokens. `TrustBaseError`, `HistoryError`, `RangeError`, `CacheError` and `SessionError` distinguish decoding, chain, page, pin/storage and session failures.

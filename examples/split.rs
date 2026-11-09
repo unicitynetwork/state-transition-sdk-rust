@@ -15,12 +15,12 @@
 //!
 //! [`payment::verify_payment_token`]: unicity_token::payment::verify_payment_token
 
-use std::path::Path;
 use std::time::Duration;
 
 use num_bigint::BigUint;
 
-use unicity_token::api::bft::RootTrustBase;
+use unicity_token::api::bft::trust_base_cache::{MemoryStore, Session};
+use unicity_token::api::bft::TrustBaseHistory;
 use unicity_token::api::StateId;
 use unicity_token::client::{self, AggregatorClient, HttpAggregatorClient};
 use unicity_token::crypto::signer::{Secp256k1Signer, Signer};
@@ -35,31 +35,20 @@ use unicity_token::transaction::{
 };
 use unicity_token::verify::{MintJustificationRegistry, VerificationError};
 
+#[path = "common/session.rs"]
+mod session;
+
 const DEFAULT_GATEWAY: &str = "https://gateway.testnet2.unicity.network/";
-const DEFAULT_TRUSTBASE: &str = "bft-trustbase.testnet2.json";
 
 /// A fixed burn state mask so the split's burn transfer can be re-submitted
 /// through `client::transfer` and reproduced byte-for-byte.
 const BURN_STATE_MASK: [u8; 32] = [0x42; 32];
 
-/// Build an aggregator client and its trust base from `e2e/.env`.
-fn load() -> (HttpAggregatorClient, RootTrustBase) {
+/// Build an aggregator client and the open trust base session (the release pin of the network, extended from the aggregator).
+fn load() -> (HttpAggregatorClient, Session<MemoryStore>) {
     dotenvy::from_path("e2e/.env").ok();
 
     let gateway = std::env::var("UNICITY_GATEWAY").unwrap_or_else(|_| DEFAULT_GATEWAY.to_string());
-    let trustbase =
-        std::env::var("UNICITY_TRUSTBASE").unwrap_or_else(|_| DEFAULT_TRUSTBASE.to_string());
-    let trustbase_path = if Path::new(&trustbase).is_absolute() {
-        trustbase
-    } else {
-        format!("e2e/{trustbase}")
-    };
-
-    let trust_base = RootTrustBase::from_json(
-        &std::fs::read_to_string(&trustbase_path)
-            .unwrap_or_else(|e| panic!("read trust base {trustbase_path}: {e}")),
-    )
-    .expect("parse trust base");
 
     let mut aggregator =
         HttpAggregatorClient::new(gateway).with_polling(Duration::from_secs(2), 90);
@@ -67,7 +56,9 @@ fn load() -> (HttpAggregatorClient, RootTrustBase) {
         aggregator = aggregator.with_api_key(key);
     }
 
-    (aggregator, trust_base)
+    let mut session = session::open();
+    session::refresh(&mut session, &aggregator);
+    (aggregator, session)
 }
 
 /// Application issuance policy for the coin token type. Cryptographic validity is
@@ -87,7 +78,7 @@ fn authorize_issuance(
 /// mint justification.
 fn mint_split_output(
     aggregator: &HttpAggregatorClient,
-    trust_base: &RootTrustBase,
+    trust_base: &TrustBaseHistory,
     registry: &MintJustificationRegistry,
     burnt: &Token,
     out: &SplitToken,
@@ -137,7 +128,8 @@ fn mint_split_output(
 }
 
 fn main() {
-    let (aggregator, trust_base) = load();
+    let (aggregator, session) = load();
+    let trust_base = session.history().expect("trust base history");
 
     // One shared "coin" token type for the source and every split output, so a
     // single payment data verifier covers the whole chain.
@@ -170,8 +162,8 @@ fn main() {
 
     let source = client::mint(
         &aggregator,
-        &trust_base,
-        trust_base.network_id,
+        trust_base,
+        trust_base.network_id(),
         &SignaturePredicate::new(alice.public_key()),
         coin_type.clone(),
         TokenSalt::random().expect("salt"),
@@ -209,7 +201,7 @@ fn main() {
     // policy) before constructing the irreversible burn.
     let split = TokenSplit::split(
         &source,
-        &trust_base,
+        trust_base,
         &registry,
         PaymentAssetCollection::from_cbor_bytes,
         requests,
@@ -223,7 +215,7 @@ fn main() {
     // same state mask so the certified burn matches the split proofs.
     let burnt = client::transfer(
         &aggregator,
-        &trust_base,
+        trust_base,
         &source,
         &split.burn.owner_predicate,
         &alice,
@@ -235,7 +227,7 @@ fn main() {
 
     // Mint and verify each output coin.
     for (i, out) in split.tokens.iter().enumerate() {
-        let token = mint_split_output(&aggregator, &trust_base, &registry, &burnt, out);
+        let token = mint_split_output(&aggregator, trust_base, &registry, &burnt, out);
         println!("Token[{}]: {}", i + 1, hex::encode(token.to_cbor()));
     }
 }
