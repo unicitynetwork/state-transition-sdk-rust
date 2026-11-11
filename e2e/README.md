@@ -29,11 +29,11 @@ generated token files. Mint and transfer requests set an exclusive
 Defaults:
 
 - Gateway: `https://gateway.testnet2.unicity.network/`
-- Trustbase: `./bft-trustbase.testnet2.json`
+- Trust base: the testnet2 release pin, extended from the aggregator
 - Output directory: `./artifacts`
 
 Configure or override these with `UNICITY_GATEWAY`, `UNICITY_API_KEY`,
-`UNICITY_TRUSTBASE`, and `UNICITY_OUTPUT_DIR`.
+`UNICITY_NETWORK` (`testnet2` or `mainnet`), `UNICITY_LOCAL_BUNDLE` (the complete trust-base bundle of a local deployment) and `UNICITY_OUTPUT_DIR`.
 
 The generated wallets are intentionally ephemeral. Their private keys remain
 in process memory and are discarded when the demo exits.

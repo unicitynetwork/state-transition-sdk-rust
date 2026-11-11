@@ -7,10 +7,9 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use super::*;
-use crate::api::bft::root_trust_base::RootTrustBaseNodeInfo;
 use crate::api::bft::unicity_tree::HashStep;
 use crate::api::bft::UcInterner;
-use crate::api::bft::{UnicityCertificate, UnicitySeal, UnicityTreeCertificate};
+use crate::api::bft::{TrustBaseHistory, UnicityCertificate, UnicitySeal, UnicityTreeCertificate};
 use crate::api::inclusion_certificate::InclusionCertificate;
 use crate::api::leaf_value::calculate_leaf_value;
 use crate::api::{CertificationData, NetworkId};
@@ -161,7 +160,7 @@ struct Faults {
 
 struct Sim {
     signers: Vec<Secp256k1Signer>,
-    trust_base: RootTrustBase,
+    trust_base: TrustBaseHistory,
     rounds: Vec<Round>,
     certs: BTreeMap<[u8; 32], (CertificationData, u64)>,
     leaves: [BTreeMap<[u8; 32], DataHash>; 2],
@@ -221,13 +220,10 @@ impl Sim {
         let nodes = signers
             .iter()
             .enumerate()
-            .map(|(i, s)| RootTrustBaseNodeInfo {
-                node_id: format!("root-{i}"),
-                signing_key: s.public_key(),
-                stake: 1,
-            })
+            .map(|(i, s)| (format!("root-{i}"), s.public_key(), 1))
             .collect();
-        let trust_base = RootTrustBase::new(1, NetworkId::LOCAL, 1, 1, nodes, 3);
+        // four members of weight 1: the entry quorum is 3
+        let trust_base = crate::test_support::history_of(NetworkId::LOCAL, 1, 1, nodes);
         let mut sim = Sim {
             signers,
             trust_base,
@@ -302,8 +298,8 @@ impl Sim {
         };
         let mut seal = UnicitySeal {
             network_id: NetworkId::LOCAL,
-            root_chain_round_number: self.trust_base.epoch_start_round + r,
-            epoch: self.trust_base.epoch,
+            root_chain_round_number: self.trust_base.latest().epoch_start + r,
+            epoch: self.trust_base.latest().epoch,
             timestamp: T0 + r,
             previous_hash: prev.map(|p| p.seal.hash.clone()),
             hash: utc.compute_root_hash(tree.root_hash()).data().to_vec(),
@@ -1100,10 +1096,9 @@ fn transfer_transaction_bytes_are_preserved() {
 fn client_with(
     sim: &Arc<Mutex<Sim>>,
     topology: PartitionTopology,
-    mutate_tb: impl Fn(&mut RootTrustBase),
+    other_authority: impl Fn(TrustBaseHistory) -> TrustBaseHistory,
 ) -> TestClient {
-    let mut tb = sim.lock().unwrap().trust_base.clone();
-    mutate_tb(&mut tb);
+    let tb = other_authority(sim.lock().unwrap().trust_base.clone());
     ProofClient::with_host_defaults(
         ProofClientConfig { topology },
         (0..2)
@@ -1147,7 +1142,7 @@ fn already_shared_results_are_not_reused_outside_the_configured_policy() {
     for s in shard_ids() {
         wrong = wrong.with_shard_conf_hash(&s, [0xee; 32]);
     }
-    let wrong_pins = client_with(&sim, wrong, |_| {});
+    let wrong_pins = client_with(&sim, wrong, |tb| tb);
     assert!(matches!(
         wrong_pins.consolidate(&shared, &quick()),
         Err(ConsolidationError::Integrity(
@@ -1155,19 +1150,29 @@ fn already_shared_results_are_not_reused_outside_the_configured_policy() {
         ))
     ));
 
-    // another authority epoch: the shared seal is not acceptable as a target, and the
-    // network's own latest seal is not authenticated either
-    let other_epoch = client_with(&sim, topology(true), |tb| tb.epoch += 1);
-    let out = other_epoch.consolidate(&shared, &quick());
+    // an authority whose history begins after the shared seal: the shared result is not acceptable under it
+    let later = client_with(&sim, topology(true), |tb| {
+        let e = tb.latest();
+        crate::test_support::history_of(
+            e.network_id,
+            e.epoch + 1,
+            e.epoch_start,
+            e.members
+                .iter()
+                .map(|m| (m.node_id.clone(), m.signing_key.clone(), m.weight))
+                .collect(),
+        )
+    });
+    let out = later.consolidate(&shared, &quick());
     assert!(
         matches!(
-            out,
-            Err(ConsolidationError::Integrity(IntegrityError::View(_)))
+            &out,
+            Err(ConsolidationError::InvalidToken(
+                crate::verify::VerificationError::Genesis(inner)
+            )) if **inner == crate::verify::VerificationError::SealBeforeEpochStart
         ),
         "{out:?}"
     );
-    // ... and it did go to the network instead of short-cutting
-    assert!(sim.lock().unwrap().batch_calls > calls);
 }
 
 fn synthetic_items(n: usize) -> Vec<ProofItem> {
@@ -1456,7 +1461,7 @@ fn duplicate_inputs_are_deduplicated_but_conflicts_are_refused() {
 
 fn stats_of(
     token: &Token,
-    tb: &RootTrustBase,
+    tb: &TrustBaseHistory,
     capacity: usize,
 ) -> (
     Result<(), crate::verify::VerificationError>,

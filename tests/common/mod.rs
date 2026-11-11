@@ -1,5 +1,5 @@
 //! Shared helpers of the long-poll transport tests: fixture proofs and a scripted
-//! loopback JSON-RPC server that can delay, record and script each reply.
+//! loopback JSON-RPC server that can delay, record and script each reply, and the one-entry trust base history of the flow tests.
 #![allow(dead_code)]
 
 use std::io::Read;
@@ -86,6 +86,7 @@ pub fn state_id(b: u8) -> StateId {
     StateId::from_cbor(Decoder::new(&cbor)).unwrap()
 }
 
+#[allow(unused_imports)]
 pub use self::mock::*;
 
 mod mock {
@@ -190,6 +191,20 @@ mod mock {
         pub method: String,
         /// The JSON `params` value.
         pub params: serde_json::Value,
+        /// The request headers, names lowercased.
+        pub headers: Vec<(String, String)>,
+    }
+
+    impl Seen {
+        /// The values of header `name` (case-insensitive), in order.
+        pub fn header(&self, name: &str) -> Vec<String> {
+            let name = name.to_lowercase();
+            self.headers
+                .iter()
+                .filter(|(k, _)| *k == name)
+                .map(|(_, v)| v.clone())
+                .collect()
+        }
     }
 
     pub struct Scripted {
@@ -223,6 +238,15 @@ mod mock {
                             at: Instant::now(),
                             method: json["method"].as_str().unwrap_or("").to_string(),
                             params: json["params"].clone(),
+                            headers: request
+                                .split("\r\n\r\n")
+                                .next()
+                                .unwrap_or("")
+                                .lines()
+                                .skip(1)
+                                .filter_map(|l| l.split_once(':'))
+                                .map(|(k, v)| (k.trim().to_lowercase(), v.trim().to_string()))
+                                .collect(),
                         };
                         let index = {
                             let mut l = log.lock().unwrap();
@@ -340,4 +364,27 @@ pub fn http_response_with(status_line: &str, headers: &[&str], body: &str) -> Ve
         body.len()
     )
     .into_bytes()
+}
+
+// --- trust base history ------------------------------------------------------
+
+/// A one-entry trust base history (the genesis entry of `network` at `epoch`, from root round `epoch_start`) whose members are
+/// `(node id, signing key, weight)`. The quorum threshold is the entry rule `floor(2W/3)+1` of the total weight `W`; a fixture whose
+/// quorum differs from it is not representable and the call panics. For tests; a deployment's history comes from its pin.
+pub fn history_of(
+    network: unicity_token::api::NetworkId,
+    epoch: u64,
+    epoch_start: u64,
+    nodes: Vec<(String, unicity_token::crypto::signature::PublicKey, u64)>,
+) -> unicity_token::api::bft::TrustBaseHistory {
+    use unicity_token::api::bft::{TrustBaseEntry, TrustBaseHistory, TrustBaseMember};
+    let members = nodes
+        .into_iter()
+        .map(|(id, key, weight)| TrustBaseMember::new(id, key, weight))
+        .collect();
+    TrustBaseHistory::from_genesis(
+        TrustBaseEntry::genesis(network, epoch, epoch_start, members),
+        None,
+    )
+    .expect("a valid one-entry history")
 }

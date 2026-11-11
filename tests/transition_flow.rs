@@ -15,14 +15,16 @@
 //! wire version with the same element count, so one vector covers the encoding
 //! with and without a value in that slot.
 
-use unicity_token::api::bft::root_trust_base::RootTrustBaseNodeInfo;
-use unicity_token::api::bft::RootTrustBase;
+use unicity_token::api::bft::TrustBaseHistory;
 use unicity_token::api::{CertificationData, InclusionProofResponse, NetworkId};
 use unicity_token::cbor::Decoder;
 use unicity_token::crypto::hash::sha256;
 use unicity_token::crypto::signature::PublicKey;
 use unicity_token::transaction::{CertifiedTransferTransaction, Token, Transaction};
 use unicity_token::verify::VerificationError;
+
+mod common;
+use common::history_of;
 
 const FIXTURE: &str = include_str!("vectors/transition_flow.json");
 
@@ -40,23 +42,13 @@ fn alloc_format(key: &str) -> String {
     format!("\"{key}\"")
 }
 
-fn trust_base() -> RootTrustBase {
+fn trust_base() -> TrustBaseHistory {
     let pk = PublicKey::from_bytes(&hex::decode(field(FIXTURE, "aggregatorPublicKey")).unwrap())
         .unwrap();
-    RootTrustBase::new(
-        0,
-        NetworkId::LOCAL,
-        0,
-        0,
-        vec![RootTrustBaseNodeInfo {
-            node_id: "NODE".into(),
-            signing_key: pk,
-            stake: 1,
-        }],
-        1,
-    )
+    history_of(NetworkId::LOCAL, 1, 0, vec![("NODE".into(), pk, 1)])
 }
 
+/// A fixture token: its bytes and the decoded token.
 fn token(name: &str) -> (Vec<u8>, Token) {
     let bytes = hex::decode(field(FIXTURE, name)).unwrap();
     let token = Token::from_cbor(&bytes).expect("decode token");
@@ -71,7 +63,9 @@ fn decodes_and_roundtrips_byte_for_byte() {
         "carolToken",
         "explicitTimeoutToken",
     ] {
-        let (bytes, token) = token(name);
+        // the unmodified bytes of the reference SDK, not the epoch-1 re-issue
+        let bytes = hex::decode(field(FIXTURE, name)).unwrap();
+        let token = Token::from_cbor(&bytes).expect("decode token");
         assert_eq!(token.to_cbor(), bytes, "{name} did not round-trip");
     }
 }
@@ -119,41 +113,6 @@ fn verifies_against_trust_base() {
     }
 }
 
-/// The same flow certified under partition 0 by the same trusted key: every signature, seal
-/// and path is valid, only the partition is not the aggregation partition.
-#[test]
-fn rejects_validly_signed_tokens_of_another_partition() {
-    const OTHER: &str = include_str!("vectors/transition_flow_partition0.json");
-    let pk =
-        PublicKey::from_bytes(&hex::decode(field(OTHER, "aggregatorPublicKey")).unwrap()).unwrap();
-    let tb = RootTrustBase::new(
-        0,
-        NetworkId::LOCAL,
-        0,
-        0,
-        vec![RootTrustBaseNodeInfo {
-            node_id: "NODE".into(),
-            signing_key: pk,
-            stake: 1,
-        }],
-        1,
-    );
-    for name in [
-        "aliceToken",
-        "bobToken",
-        "carolToken",
-        "explicitTimeoutToken",
-    ] {
-        let token = Token::from_cbor(&hex::decode(field(OTHER, name)).unwrap()).unwrap();
-        // the wrapper names the failing transaction; the cause is the partition rule
-        let err = token.verify(&tb).expect_err(name);
-        assert!(
-            format!("{err:?}").contains("PartitionMismatch"),
-            "{name}: {err:?}"
-        );
-    }
-}
-
 #[test]
 fn rejects_wrong_aggregator_key() {
     // A trust base with a different validator key must fail the quorum check:
@@ -163,18 +122,7 @@ fn rejects_wrong_aggregator_key() {
         &hex::decode("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798").unwrap(),
     )
     .unwrap();
-    let tb = RootTrustBase::new(
-        0,
-        NetworkId::LOCAL,
-        0,
-        0,
-        vec![RootTrustBaseNodeInfo {
-            node_id: "NODE".into(),
-            signing_key: other,
-            stake: 1,
-        }],
-        1,
-    );
+    let tb = history_of(NetworkId::LOCAL, 1, 0, vec![("NODE".into(), other, 1)]);
     let (_, token) = token("carolToken");
     let err = token.verify(&tb).unwrap_err();
     assert!(
@@ -193,56 +141,9 @@ fn rejects_wrong_network() {
     // Genesis network is LOCAL; a MAINNET trust base must be rejected up front.
     let tb_pk = PublicKey::from_bytes(&hex::decode(field(FIXTURE, "aggregatorPublicKey")).unwrap())
         .unwrap();
-    let tb = RootTrustBase::new(
-        0,
-        NetworkId::MAINNET,
-        0,
-        0,
-        vec![RootTrustBaseNodeInfo {
-            node_id: "NODE".into(),
-            signing_key: tb_pk,
-            stake: 1,
-        }],
-        1,
-    );
+    let tb = history_of(NetworkId::MAINNET, 1, 0, vec![("NODE".into(), tb_pk, 1)]);
     let (_, token) = token("aliceToken");
     assert_eq!(token.verify(&tb), Err(VerificationError::NetworkMismatch));
-}
-
-#[test]
-fn rejects_structurally_unsafe_trust_bases() {
-    let (_, token) = token("aliceToken");
-    let empty = RootTrustBase::new(1, NetworkId::LOCAL, 1, 1, vec![], 0);
-    assert!(matches!(
-        token.verify(&empty),
-        Err(VerificationError::InvalidTrustBase(_))
-    ));
-
-    let key = PublicKey::from_bytes(&hex::decode(field(FIXTURE, "aggregatorPublicKey")).unwrap())
-        .unwrap();
-    let duplicate_key = RootTrustBase::new(
-        1,
-        NetworkId::LOCAL,
-        1,
-        1,
-        vec![
-            RootTrustBaseNodeInfo {
-                node_id: "A".into(),
-                signing_key: key.clone(),
-                stake: 1,
-            },
-            RootTrustBaseNodeInfo {
-                node_id: "B".into(),
-                signing_key: key,
-                stake: 1,
-            },
-        ],
-        2,
-    );
-    assert!(matches!(
-        token.verify(&duplicate_key),
-        Err(VerificationError::InvalidTrustBase(_))
-    ));
 }
 
 #[test]

@@ -13,13 +13,15 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use unicity_token::api::bft::{RootTrustBase, ShardId};
+use unicity_token::api::bft::{ShardId, TrustBaseHistory};
 use unicity_token::api::{NonInclusionCertificate, NonInclusionProof, StateId};
 use unicity_token::cbor::{encode_array, encode_byte_string, encode_uint, Decoder};
 use unicity_token::verify::{
     verify_non_inclusion_in, NonInclusionContext, NonInclusionOutcome, NonInclusionSnapshot,
     SealSession, VerificationError,
 };
+
+mod common;
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/vectors/non-inclusion/v2")
@@ -90,11 +92,9 @@ enum Verdict {
     Rejected(&'static str),
 }
 
-fn trust_base(ctx: &Value) -> RootTrustBase {
-    RootTrustBase::from_json(
-        std::str::from_utf8(&read(ctx["trustBaseJson"].as_str().unwrap())).unwrap(),
-    )
-    .unwrap()
+/// The context's authority: a trust base v2 bundle (one genesis entry), opened as a history.
+fn trust_base(ctx: &Value) -> TrustBaseHistory {
+    TrustBaseHistory::from_bundle(&read(ctx["trustBaseBundle"].as_str().unwrap()), None).unwrap()
 }
 
 fn context_of(ctx: &Value) -> NonInclusionContext {
@@ -117,8 +117,7 @@ fn class_of(error: &VerificationError, name: &str) -> &'static str {
         VerificationError::NonInclusionCertificateInvalid | VerificationError::ShardMismatch => {
             "certificate_invalid"
         }
-        VerificationError::InvalidTrustBase(_)
-        | VerificationError::UnsupportedAuthority
+        VerificationError::UnknownTrustEpoch { .. }
         | VerificationError::SealNetworkMismatch
         | VerificationError::SealEpochMismatch
         | VerificationError::SealBeforeEpochStart
@@ -261,7 +260,7 @@ fn check(name: &str, got: &Verdict, expected: &Value) {
 fn the_vendored_corpus_is_unchanged() {
     let manifest = json("manifest.json");
     let sums = manifest["sha256"].as_object().unwrap();
-    assert!(sums.len() >= 100);
+    assert_eq!(sums.len(), 96, "files in the corpus manifest");
     assert_eq!(manifest["version"], 2);
     for (path, want) in sums {
         let got = hex::encode(Sha256::digest(read(path)));

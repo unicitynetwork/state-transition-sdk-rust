@@ -4,12 +4,14 @@
 //! equal the trusted key. A nonconforming signature contributes zero votes.
 #![cfg(feature = "std")]
 
-use unicity_token::api::bft::root_trust_base::RootTrustBaseNodeInfo;
-use unicity_token::api::bft::{RootTrustBase, UnicitySeal};
+use unicity_token::api::bft::{TrustBaseHistory, UnicitySeal};
 use unicity_token::api::NetworkId;
 use unicity_token::cbor::Decoder;
 use unicity_token::crypto::signature::{PublicKey, Signature};
 use unicity_token::verify::{SealSession, VerificationError};
+
+mod common;
+use common::history_of;
 
 const VECTORS: &str = include_str!("vectors/o3-signature-recovery/v1/vectors.json");
 
@@ -89,25 +91,23 @@ fn recovery_vectors_agree_with_the_reference() {
 fn seal_quorum_vectors_count_only_conforming_signatures() {
     let f = fixtures();
     let s = &f["seal"];
-    let nodes = s["nodes"]
+    let nodes: Vec<_> = s["nodes"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|n| RootTrustBaseNodeInfo {
-            node_id: n["id"].as_str().unwrap().to_string(),
-            signing_key: key(n["publicKeyCompressed"].as_str().unwrap()),
-            stake: n["stake"].as_u64().unwrap(),
+        .map(|n| {
+            (
+                n["id"].as_str().unwrap().to_string(),
+                key(n["publicKeyCompressed"].as_str().unwrap()),
+                n["stake"].as_u64().unwrap(),
+            )
         })
         .collect();
     assert_eq!(s["networkId"].as_u64(), Some(3));
-    let tb = RootTrustBase::new(
-        1,
-        NetworkId::LOCAL,
-        s["epoch"].as_u64().unwrap(),
-        0,
-        nodes,
-        s["quorumThreshold"].as_u64().unwrap(),
-    );
+    // the history derives its quorum as floor(2W/3)+1: the shared fixture must record the same
+    let total: u64 = nodes.iter().map(|n| n.2).sum();
+    assert_eq!(s["quorumThreshold"].as_u64(), Some(total * 2 / 3 + 1));
+    let tb = history_of(NetworkId::LOCAL, s["epoch"].as_u64().unwrap(), 0, nodes);
     let cases = s["cases"].as_array().unwrap();
     assert!(cases.len() >= 10);
     for case in cases {
@@ -138,22 +138,16 @@ mod generated {
             .collect()
     }
 
-    fn setup(signers: &[Secp256k1Signer]) -> (RootTrustBase, UnicitySeal) {
-        let tb = RootTrustBase::new(
-            1,
+    fn setup(signers: &[Secp256k1Signer]) -> (TrustBaseHistory, UnicitySeal) {
+        let tb = history_of(
             NetworkId::LOCAL,
             1,
             1,
             signers
                 .iter()
                 .enumerate()
-                .map(|(i, s)| RootTrustBaseNodeInfo {
-                    node_id: format!("n{i}"),
-                    signing_key: s.public_key(),
-                    stake: 1,
-                })
+                .map(|(i, s)| (format!("n{i}"), s.public_key(), 1))
                 .collect(),
-            3,
         );
         let mut seal = UnicitySeal {
             network_id: NetworkId::LOCAL,
@@ -242,21 +236,15 @@ mod surplus {
         let signers: Vec<_> = (1..=4u8)
             .map(|i| Secp256k1Signer::from_bytes(&[i; 32]).unwrap())
             .collect();
-        let tb = RootTrustBase::new(
-            1,
+        let tb = history_of(
             NetworkId::LOCAL,
             1,
             1,
             signers
                 .iter()
                 .enumerate()
-                .map(|(i, s)| RootTrustBaseNodeInfo {
-                    node_id: format!("n{i}"),
-                    signing_key: s.public_key(),
-                    stake: 1,
-                })
+                .map(|(i, s)| (format!("n{i}"), s.public_key(), 1))
                 .collect(),
-            3,
         );
         let mut seal = UnicitySeal {
             network_id: NetworkId::LOCAL,

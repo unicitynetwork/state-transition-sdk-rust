@@ -5,12 +5,12 @@
 //!
 //! | Variable | Meaning |
 //! |---|---|
-//! | `UNICITY_TRUSTBASE` | path of the root trust base JSON (default `e2e/bft-trustbase.testnet2.json`) |
+//! | `UNICITY_NETWORK`, `UNICITY_LOCAL_BUNDLE` | the trust base history, see `session.rs` (default: the testnet2 release pin) |
 //! | `UNICITY_PARTITION_ID` | the partition number |
 //! | `UNICITY_SHARD_ENDPOINTS` | `bits=url` pairs, comma separated, e.g. `00=https://a/,01=https://b/,10=...,11=...`; one shard: `=https://a/` |
 //! | `UNICITY_API_KEY` | optional API key (HTTPS only) |
 
-use unicity_token::api::bft::{RootTrustBase, ShardId};
+use unicity_token::api::bft::{ShardId, TrustBaseHistory};
 use unicity_token::client::{HttpAggregatorClient, ProofClient, ProofClientConfig};
 use unicity_token::client::{SystemClock, ThreadedExecutor};
 use unicity_token::consolidation::PartitionTopology;
@@ -27,14 +27,9 @@ fn shard(bits: &str) -> ShardId {
 pub type Client = ProofClient<HttpAggregatorClient, SystemClock, ThreadedExecutor>;
 
 /// Build the trust base and the proof client from the environment.
-pub fn load() -> (RootTrustBase, Client) {
+pub fn load() -> (TrustBaseHistory, Client) {
     dotenvy::from_path("e2e/.env").ok();
-    let trustbase = std::env::var("UNICITY_TRUSTBASE")
-        .unwrap_or_else(|_| "e2e/bft-trustbase.testnet2.json".into());
-    let trust_base = RootTrustBase::from_json(
-        &std::fs::read_to_string(&trustbase).unwrap_or_else(|e| panic!("read {trustbase}: {e}")),
-    )
-    .expect("parse trust base");
+    let mut session = crate::session::open();
 
     let spec = std::env::var("UNICITY_SHARD_ENDPOINTS").expect("UNICITY_SHARD_ENDPOINTS");
     let mut endpoints = Vec::new();
@@ -46,6 +41,9 @@ pub fn load() -> (RootTrustBase, Client) {
         }
         endpoints.push((shard(bits.trim()), http));
     }
+    // entries the release pin does not have yet come from the first shard's aggregator (untrusted transport; verified from the held tip)
+    crate::session::refresh(&mut session, &endpoints[0].1);
+    let trust_base = session.history().expect("trust base history").clone();
     // the trusted scheme: the configured shards (a single empty id is the unsharded partition)
     let scheme = if endpoints.len() == 1 && endpoints[0].0.length() == 0 {
         Vec::new()

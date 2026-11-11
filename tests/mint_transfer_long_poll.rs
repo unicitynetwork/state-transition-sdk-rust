@@ -13,8 +13,7 @@ mod common;
 use std::time::Duration;
 
 use common::*;
-use unicity_token::api::bft::root_trust_base::RootTrustBaseNodeInfo;
-use unicity_token::api::bft::RootTrustBase;
+use unicity_token::api::bft::TrustBaseHistory;
 use unicity_token::api::NetworkId;
 use unicity_token::client::{self, ClientError, HttpAggregatorClient};
 use unicity_token::crypto::signature::PublicKey;
@@ -25,21 +24,10 @@ use unicity_token::transaction::Token;
 
 const FIXTURE: &str = include_str!("vectors/transition_flow.json");
 
-fn trust_base() -> RootTrustBase {
+fn trust_base() -> TrustBaseHistory {
     let pk = PublicKey::from_bytes(&hex::decode(field(FIXTURE, "aggregatorPublicKey")).unwrap())
         .unwrap();
-    RootTrustBase::new(
-        0,
-        NetworkId::LOCAL,
-        0,
-        0,
-        vec![RootTrustBaseNodeInfo {
-            node_id: "NODE".into(),
-            signing_key: pk,
-            stake: 1,
-        }],
-        1,
-    )
+    history_of(NetworkId::LOCAL, 1, 0, vec![("NODE".into(), pk, 1)])
 }
 
 fn obj(proof: &str, status: &str, echo: Option<u64>) -> String {
@@ -104,7 +92,8 @@ fn do_mint(c: &HttpAggregatorClient) {
 }
 
 fn do_transfer(c: &HttpAggregatorClient) {
-    let token = Token::from_cbor(&hex::decode(field(FIXTURE, "aliceToken")).unwrap()).unwrap();
+    let raw = hex::decode(field(FIXTURE, "aliceToken")).unwrap();
+    let token = Token::from_cbor(&raw).unwrap();
     let bob = Secp256k1Signer::generate().unwrap();
     let alice = Secp256k1Signer::generate().unwrap();
     let err = client::transfer(

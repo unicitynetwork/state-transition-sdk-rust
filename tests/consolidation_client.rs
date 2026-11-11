@@ -17,9 +17,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use unicity_token::api::bft::root_trust_base::RootTrustBaseNodeInfo;
-use unicity_token::api::bft::{RootTrustBase, ShardId};
-use unicity_token::api::{InclusionProofResponse, NetworkId, StateId};
+use unicity_token::api::bft::{ShardId, TrustBaseHistory};
+use unicity_token::api::{InclusionProofResponse, StateId};
 use unicity_token::cbor::Decoder;
 use unicity_token::client::{
     BundleOutcome, CancelToken, ConsolidateOptions, ConsolidationError, HttpAggregatorClient,
@@ -27,8 +26,9 @@ use unicity_token::client::{
     UnavailableReason,
 };
 use unicity_token::consolidation::{PartitionTopology, PartitionViewError};
-use unicity_token::crypto::signature::PublicKey;
 use unicity_token::verify::VerificationError;
+
+mod common;
 
 fn corpus(path: &str) -> String {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -53,35 +53,10 @@ fn shard(bits: &str) -> ShardId {
     id
 }
 
-fn trust_base(path: &str) -> RootTrustBase {
+fn trust_base(path: &str) -> TrustBaseHistory {
     let bytes = corpus_bytes(path);
-    let items = Decoder::new(&bytes)
-        .expect_tag(39000)
-        .unwrap()
-        .array(Some(10))
-        .unwrap();
-    let nodes = items[4]
-        .array(None)
-        .unwrap()
-        .into_iter()
-        .map(|n| {
-            let f = n.array(Some(3)).unwrap();
-            RootTrustBaseNodeInfo {
-                node_id: f[0].text().unwrap().into(),
-                signing_key: PublicKey::from_bytes(f[1].bytes_value().unwrap()).unwrap(),
-                stake: f[2].uint().unwrap(),
-            }
-        })
-        .collect();
-    RootTrustBase::try_new(
-        items[0].uint().unwrap(),
-        NetworkId::new(items[1].uint().unwrap() as u16).unwrap(),
-        items[2].uint().unwrap(),
-        items[3].uint().unwrap(),
-        nodes,
-        items[5].uint().unwrap(),
-    )
-    .unwrap()
+    // the authority: a trust base v2 bundle holding the genesis entry, opened as a history
+    TrustBaseHistory::from_bundle(&bytes, None).unwrap()
 }
 
 // ---------------------------------------------------------------- mock shard
@@ -198,7 +173,7 @@ struct Case {
     topology: PartitionTopology,
     #[allow(dead_code)]
     partition: u32,
-    trust_base: RootTrustBase,
+    trust_base: TrustBaseHistory,
     items: Vec<ProofItem>,
     master_shard: String,
     master_reply: Value,
